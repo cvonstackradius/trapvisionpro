@@ -2,6 +2,25 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>TrapVisionPro listens for your "pull" and "bang" voice commands during a round.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>TrapVisionPro uses on-device speech recognition to detect the "pull" and "bang" voice commands during a round.</string>
+	<key>NSWorldSensingUsageDescription</key>
+	<string>TrapVisionPro tracks your Logitech Muse pointer's position in your surroundings so virtual clays and scoring react correctly to where you're aiming.</string>
+	<key>NSHandsTrackingUsageDescription</key>
+	<string>TrapVisionPro uses hand tracking as part of tracking your Logitech Muse pointer's position while you aim.</string>
+	<key>NSAccessoryTrackingUsageDescription</key>
+	<string>TrapVisionPro tracks your Logitech Muse pointer's position and orientation so it knows where you're aiming.</string>
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>SpatialGamepad</string>
+		</dict>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationPreferredDefaultSceneSessionRole</key>
