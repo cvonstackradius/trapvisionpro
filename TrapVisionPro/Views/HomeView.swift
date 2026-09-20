@@ -110,17 +110,19 @@ struct HomeView: View {
 
                 VStack(spacing: 10) {
                     Picker("Immersion", selection: $game.isFullImmersion) {
-                        Text("Mixed").tag(false)
+                        Text("Range (Crown)").tag(false)
                         Text("Full").tag(true)
                     }
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 360)
                     .onChange(of: game.isFullImmersion) { _, isFull in
-                        immersionStyle = isFull ? .full : .mixed
+                        immersionStyle = isFull
+                            ? .full
+                            : .progressive(0.15...0.9, initialAmount: 0.6)
                     }
                     Text(game.isFullImmersion
                          ? "Real world hidden — a virtual gun tracks the Muse."
-                         : "See your real room and real gun through passthrough.")
+                         : "A virtual range starts about 60% immersive. Turn the Digital Crown to reveal more of your real room and Muse.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
@@ -237,7 +239,7 @@ struct HomeView: View {
                     .buttonStyle(.bordered)
                 }
 
-                Text("Exit anytime with the Exit button on the bottom bar, or long-press look+pinch. In Practice, aim at the trap house and fire to cycle warm-up angle (Straight → Slight Curve → Full).")
+                Text("Exit anytime with the Exit button on the bottom bar, or long-press look+pinch. In Practice, the first Muse press calls a clay and the second fires.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

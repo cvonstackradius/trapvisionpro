@@ -12,9 +12,11 @@ import SwiftUI
 struct TrapVisionProApp: App {
 
     @StateObject private var game = GameState()
-    // Mirrors `game.isFullImmersion` (set by the Home screen's picker) into
-    // the actual system value `.immersionStyle(selection:)` needs.
-    @State private var immersionStyle: ImmersionStyle = .mixed
+    // The normal range option is a 60% progressive portal: the virtual
+    // range fills most of the view, while the Digital Crown can reveal more
+    // of the real room (and the physical Muse) when the player wants it.
+    // Full remains available as the separate, no-passthrough option.
+    @State private var immersionStyle: ImmersionStyle = .progressive(0.15...0.9, initialAmount: 0.6)
 
     var body: some Scene {
         WindowGroup(id: "Home") {
@@ -26,7 +28,7 @@ struct TrapVisionProApp: App {
         ImmersiveSpace(id: "TrapRange") {
             TrapRangeImmersiveView(game: game)
         }
-        .immersionStyle(selection: $immersionStyle, in: .mixed, .full)
+        .immersionStyle(selection: $immersionStyle, in: .progressive, .full)
 
         // A minimal scene just to prove the Muse itself works, isolated
         // from the trap game's complexity — see MuseDebugImmersiveView.

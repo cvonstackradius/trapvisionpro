@@ -87,9 +87,29 @@ final class MuseAccessoryManager: ObservableObject {
     /// Local-space translation from the Muse's reported aim origin to the
     /// real muzzle. Rotation-only calibration still leaves a close-range
     /// parallax error whenever the Muse sits behind or below the muzzle.
-    @Published private(set) var muzzleOffset: SIMD3<Float> = .zero {
+    /// Starts at a small backward guess (not zero) — on-device testing
+    /// found the uncalibrated gun rendering with its whole body sitting
+    /// right at the tracked tip, poking out further than it should.
+    /// Overwritten the moment real calibration runs (`updateMuzzleOffset`)
+    /// or a previously-saved value loads, so this only matters before that.
+    @Published private(set) var muzzleOffset: SIMD3<Float> = SIMD3<Float>(0, 0, 0.12) {
         didSet { applyAimVisualCorrection() }
     }
+
+    /// The "aim" accessory location's own reported "up" doesn't match a
+    /// person's actual up while gripping the housing like a gun —
+    /// on-device testing found the rendered gun upside down (bead at the
+    /// bottom) even with `aimCorrection` at identity. This is a fixed 180°
+    /// roll about the anchor's own forward axis, applied ONLY to the
+    /// visual: rotating about the forward axis itself never changes the
+    /// forward direction, so `aimOriginAndForward`'s hit-ray math is
+    /// completely unaffected by this. Kept separate from user calibration
+    /// on purpose — solving `aimCorrection` from "rotate this vector to
+    /// that vector" leaves the roll around the resulting axis completely
+    /// unconstrained, so no amount of calibration samples could ever have
+    /// fixed this on their own.
+    private static let visualRollBaseline = simd_quatf(angle: .pi, axis: SIMD3<Float>(0, 0, 1))
+    private var visualOrientation: simd_quatf { aimCorrection * Self.visualRollBaseline }
 
     private struct CalibrationSample {
         let rawTransform: float4x4
@@ -224,7 +244,7 @@ final class MuseAccessoryManager: ObservableObject {
 
     func resetCalibration() {
         aimCorrection = simd_quatf(real: 1, imag: .zero)
-        muzzleOffset = .zero
+        muzzleOffset = SIMD3<Float>(0, 0, 0.12)
         calibrationSampleCount = 0
         calibrationSamples.removeAll()
         let defaults = UserDefaults.standard
@@ -275,14 +295,14 @@ final class MuseAccessoryManager: ObservableObject {
         // freshly (re)attached visual would render at the RAW orientation
         // until the next time `aimCorrection` happens to change, which may
         // be never in a session where calibration was already done earlier.
-        entity.orientation = aimCorrection
+        entity.orientation = visualOrientation
         entity.position = muzzleOffset
         aimVisual = entity
         aimAnchor?.addChild(entity)
     }
 
     private func applyAimVisualCorrection() {
-        aimVisual?.orientation = aimCorrection
+        aimVisual?.orientation = visualOrientation
         aimVisual?.position = muzzleOffset
     }
 
@@ -477,8 +497,30 @@ final class MuseAccessoryManager: ObservableObject {
         guard accessoryTrackingAvailable else { return }
         if let stylus {
             await setupAiming(device: stylus)
+            // The stylus can be discovered before its input profile is
+            // populated. Re-wiring here is safe (it replaces handlers) and
+            // lets a tracking retry recover a trigger handler too.
+            observeInputs(device: stylus)
         } else if let controller {
             await setupAiming(device: controller)
+            observeInputs(device: controller)
+        }
+    }
+
+    /// Called as the actual immersive range becomes active. A Muse can
+    /// connect while the Home window is frontmost, when accessory poses
+    /// aren't yet available. The old retry window then expires before the
+    /// range opens, making the manual Retry Tracking button appear to be a
+    /// required startup step. Repeat that safe, availability-gated setup
+    /// automatically here instead.
+    func activateForImmersiveRange() async {
+        guard stylus != nil || controller != nil else {
+            aimStatus = "Waiting for Logitech Muse connection"
+            return
+        }
+        await retryAccessoryTracking()
+        if !isAimTrackingLive {
+            startAutoRetryLoop()
         }
     }
 
@@ -520,7 +562,7 @@ final class MuseAccessoryManager: ObservableObject {
             accessoryRoot.addChild(anchor)
             self.aimAnchor = anchor
             if let aimVisual {
-                aimVisual.orientation = aimCorrection
+                aimVisual.orientation = visualOrientation
                 aimVisual.position = muzzleOffset
                 anchor.addChild(aimVisual)
             }
@@ -548,16 +590,16 @@ final class MuseAccessoryManager: ObservableObject {
     /// `pressedDidChangeHandler`'s `pressed` argument already tells us
     /// exactly that.
     ///
-    /// `device.input` can briefly be nil right at connect time — the old
-    /// code silently gave up forever if that happened (no retry, no
-    /// visible error), which would look identical to "button does
-    /// nothing." One retry after a beat covers that window.
+    /// `device.input` can briefly be nil right at connect time. Keep trying
+    /// through the normal connection-settling window rather than giving up
+    /// after a single half-second retry.
     private func observeInputs(device: GCStylus, attempt: Int = 0) {
         guard let input = device.input else {
-            if attempt == 0 {
+            if attempt < 10 {
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 500_000_000)
-                    self?.observeInputs(device: device, attempt: 1)
+                    guard !Task.isCancelled else { return }
+                    self?.observeInputs(device: device, attempt: attempt + 1)
                 }
             } else {
                 aimStatus += " (also: stylus has no input profile — buttons can't work)"

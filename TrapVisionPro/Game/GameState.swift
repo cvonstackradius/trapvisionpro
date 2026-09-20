@@ -208,10 +208,10 @@ final class GameState: ObservableObject {
         }
     }
 
-    /// Chosen on the Home screen before entering either mode. Mixed shows
-    /// your real surroundings and real gun through passthrough; Full
-    /// replaces everything with the virtual field, so the virtual gun
-    /// overlay (tracking the Muse) has to stand in for the real one.
+    /// Chosen on the Home screen before entering either mode. Range is a
+    /// progressive, Crown-adjustable blend of the virtual range and
+    /// passthrough; Full replaces everything with the virtual field, so the
+    /// virtual gun overlay (tracking the Muse) has to stand in for the real one.
     @Published var isFullImmersion: Bool = false
 
     /// Home-screen picker. Widens hit forgiveness — see Difficulty's doc
@@ -435,14 +435,11 @@ final class GameState: ObservableObject {
         lastResultText = "Pulled — Station \(station.id)"
     }
 
-    /// The Muse's single trigger control: pull if nothing's airborne yet,
-    /// otherwise fire at what already is — unless you're aiming at the
-    /// trap house itself, in which case that cycles the warm-up angle
-    /// instead of pulling (see WarmupLevel). Works the same way for
-    /// look+pinch (manualTrigger routes through here too), so there's no
-    /// separate gesture to learn. Exiting no longer lives here — use the
-    /// always-visible Exit button on the bottom bar, or long-press
-    /// look+pinch — so this gesture is free for warm-up cycling instead.
+    /// The Muse's single trigger control is deliberately unambiguous:
+    /// first press calls for a clay; second press fires at it. Earlier
+    /// builds overloaded "aim at the trap house + press" to alter warm-up
+    /// spread, which is exactly where a new player naturally points when
+    /// calling for a bird — it looked as though the Muse did nothing.
     private func handleMuseTrigger() {
         if mode == .calibration {
             fireCalibrationShot()
@@ -453,11 +450,7 @@ final class GameState: ObservableObject {
             return
         }
         if activeClay == nil {
-            if isAimedAtTrapHouse() {
-                cycleWarmupLevel()
-            } else {
-                pullCalled()
-            }
+            pullCalled()
         } else {
             triggerFired()
         }
@@ -543,26 +536,6 @@ final class GameState: ObservableObject {
         }
     }
 
-    /// How close (meters) an aim ray has to pass to the trap house's center
-    /// to count as "aiming at it" — roughly the house's own footprint.
-    private static let trapHouseAimRadius: Float = 0.6
-
-    private func isAimedAtTrapHouse() -> Bool {
-        guard let aim = museManager.aimOriginAndForward ?? fallbackAimProvider?() else { return false }
-
-        // fieldRoot can now rotate too (recenterField), so the house's
-        // world position needs the rotation applied to its field-local
-        // offset before adding fieldRoot's own position — a plain add
-        // (correct back when fieldRoot only ever translated) would drift
-        // once you'd recentered facing any direction other than default.
-        let trapHouseWorld = fieldRoot.position + fieldRoot.orientation.act(TrapField.trapHousePosition)
-        let toHouse = trapHouseWorld - aim.origin
-        let alongRay = dot(toHouse, aim.forward)
-        guard alongRay > 0 else { return false }
-        let closestPoint = aim.origin + aim.forward * alongRay
-        return length(trapHouseWorld - closestPoint) <= Self.trapHouseAimRadius
-    }
-
     /// Manual fallback trigger for people without a Muse.
     func manualTrigger() {
         guard !isPaused else { return }
@@ -594,7 +567,7 @@ final class GameState: ObservableObject {
             return
         }
         let result = simulatePelletShot(aimOrigin: aim.origin, aimForward: aim.forward, clay: clay,
-                                         hitRadiusMultiplier: difficulty.hitRadiusMultiplier)
+                                         hitRadiusMultiplier: effectiveHitRadiusMultiplier)
         resolveShot(result: result, clay: clay)
     }
 
@@ -609,8 +582,19 @@ final class GameState: ObservableObject {
         }
         let (origin, forward) = provider()
         let result = simulatePelletShot(aimOrigin: origin, aimForward: forward, clay: clay,
-                                         hitRadiusMultiplier: difficulty.hitRadiusMultiplier)
+                                         hitRadiusMultiplier: effectiveHitRadiusMultiplier)
         resolveShot(result: result, clay: clay)
+    }
+
+    /// Practice is a learning space, not a scorecard. Until the player has
+    /// tuned their physical Muse mount, a perfectly reasonable sight picture
+    /// can be a few centimetres off at the clay. Give Practice a modest,
+    /// explicit training allowance; Round retains the selected difficulty's
+    /// normal simulation so scores stay meaningful.
+    private var effectiveHitRadiusMultiplier: Float {
+        mode == .practice
+            ? max(difficulty.hitRadiusMultiplier, 3.0)
+            : difficulty.hitRadiusMultiplier
     }
 
     /// Common tail end of every real shot attempt: on a hit, break the clay

@@ -37,6 +37,10 @@ struct TrapRangeImmersiveView: View {
     @State private var pauseMenuAnchor: Entity?
     @State private var recenterBarAnchor: Entity?
     @State private var headAnchorRef: AnchorEntity?
+    // A mixed/full immersive space starts in an arbitrary world direction.
+    // Put the 16-yard line in front of the player as soon as head tracking
+    // becomes available, rather than requiring a first press of Recenter.
+    @State private var didInitialRecenter = false
     @State private var trapModeGroup: Entity?
     @State private var patterningBoard: Entity?
     @State private var patterningImpactsContainer: Entity?
@@ -101,23 +105,27 @@ struct TrapRangeImmersiveView: View {
             game.museManager.attachAimVisual(museOverlay)
             museGunOverlay = museOverlay
 
-            // Real 3D shotgun model — loading disabled for now. On-device
-            // testing found it rendering at a completely wrong angle while
-            // the actual aim/hit-ray was correct (confirmed independently
-            // on the patterning board), which pins this down as exactly
-            // what its own doc comment already flagged: the corrective
-            // rotation baked into `loadRealShotgunEntity` was a best guess
-            // from the mesh's raw bounding-box data, never actually
-            // confirmed on a headset, and it's wrong. Rather than keep
-            // guessing rotations blind, this stays off — showing the
-            // procedural gun, whose -Z-forward orientation is correct by
-            // construction, no guessing involved — until the real model's
-            // rotation can be tuned with someone actually looking at it.
-            // `loadRealShotgunEntity`, `gunReal`, and `museReal` are left
-            // in place so re-enabling this is a one-line change once that
-            // rotation is known.
-            _ = gunReal
-            _ = museReal
+            // Real 3D shotgun model, re-enabled: the "totally wrong angle"
+            // report turned out to have at least one confirmed, fixable
+            // cause unrelated to this model specifically — the whole aim
+            // overlay was rendering rolled 180° (bead/rib at the bottom),
+            // now corrected in MuseAccessoryManager.visualOrientation for
+            // BOTH the procedural and real geometry, since they're siblings
+            // under the same corrected root. The model's own forward-facing
+            // rotation guess (in loadRealShotgunEntity) is still unverified
+            // beyond that — if it's still wrong after this, describe
+            // exactly how (e.g. "barrel points at my face" vs "points off
+            // to the side") so the next fix is precise instead of another
+            // blind guess.
+            Task {
+                guard let model = await loadRealShotgunEntity() else { return }
+                gunReal.addChild(model.clone(recursive: true))
+                museReal.addChild(model.clone(recursive: true))
+                gunProcedural.isEnabled = false
+                gunReal.isEnabled = true
+                museProcedural.isEnabled = false
+                museReal.isEnabled = true
+            }
 
             let museMuzzleFlash = buildMuzzleFlash()
             museMuzzleFlash.position = SIMD3<Float>(0, 0.017, 0)
@@ -282,8 +290,34 @@ struct TrapRangeImmersiveView: View {
         // — worth having regardless of whether it's the whole story, since
         // it's a real, documented visionOS behavior and costs nothing.
         .handlesGameControllerEvents(matching: .gamepad)
+        // Full immersion hides the system's own Home/status affordance by
+        // default — that's the actual reason "no way to quit in full
+        // screen, had to force-quit" happened: our own Exit button and
+        // long-press pause menu are ordinary head-locked content and
+        // should always work regardless of immersion style, but if they
+        // were ever missed, hard to find, or not registering, .full
+        // normally leaves NO system-level fallback at all. This keeps that
+        // system fallback available unconditionally, in every immersion
+        // style, as a guaranteed way out no matter what our own UI does.
+        .persistentSystemOverlays(.visible)
         .task {
+            // The device may have connected while the Home window was up,
+            // before an immersive space could provide a live accessory pose.
+            // Activate/retry automatically on range entry — no setup button
+            // should be required before the Muse can aim and fire.
+            await game.museManager.activateForImmersiveRange()
             while !Task.isCancelled {
+                // `AnchorEntity(.head)` is created before the first frame but
+                // does not necessarily have a world transform immediately.
+                // Wait for its first live pose, then orient the field once.
+                // The visible Recenter control remains available afterwards
+                // whenever the player changes position or direction.
+                if !didInitialRecenter,
+                   let headAnchor = headAnchorRef,
+                   headAnchor.isAnchored {
+                    recenterField()
+                    didInitialRecenter = true
+                }
                 game.tick(dt: 1.0 / 60.0)
                 try? await Task.sleep(nanoseconds: 1_000_000_000 / 60)
             }
@@ -538,19 +572,50 @@ struct TrapRangeImmersiveView: View {
         return tree
     }
 
-    // MARK: Field geometry — stupid simple grey boxes, real-world positions
+    // MARK: Field geometry
 
     private func buildFieldGeometry(into root: Entity) {
-        let houseMesh = MeshResource.generateBox(width: 0.6, height: 0.5, depth: 0.6)
-        var houseMaterial = SimpleMaterial()
-        houseMaterial.color = .init(tint: .init(white: 0.35, alpha: 1.0))
-        let house = ModelEntity(mesh: houseMesh, materials: [houseMaterial])
-        house.position = TrapField.trapHousePosition
-        root.addChild(house)
+        // The original 60 cm grey cube is technically at the right place,
+        // but at 16 yards it is too small and dark to act as a useful visual
+        // reference in a passthrough room.  This is still deliberately
+        // simple geometry, but it reads as a real low trap house: a base,
+        // roof, and the bright slot the clay leaves from.  Unlit materials
+        // keep it visible in rooms where the virtual scene has no light probe.
+        let trapHouse = Entity()
+        trapHouse.position = TrapField.trapHousePosition
+
+        var houseMaterial = UnlitMaterial()
+        houseMaterial.color = .init(tint: .init(red: 0.30, green: 0.36, blue: 0.23, alpha: 1.0))
+        let house = ModelEntity(
+            mesh: .generateBox(width: 2.4, height: 0.65, depth: 1.35),
+            materials: [houseMaterial]
+        )
+        house.position = SIMD3<Float>(0, -0.22, 0)
+        trapHouse.addChild(house)
+
+        var roofMaterial = UnlitMaterial()
+        roofMaterial.color = .init(tint: .init(red: 0.15, green: 0.18, blue: 0.13, alpha: 1.0))
+        let roof = ModelEntity(
+            mesh: .generateBox(width: 2.7, height: 0.12, depth: 1.65),
+            materials: [roofMaterial]
+        )
+        roof.position = SIMD3<Float>(0, 0.16, 0)
+        trapHouse.addChild(roof)
+
+        var slotMaterial = UnlitMaterial()
+        slotMaterial.color = .init(tint: .init(white: 0.94, alpha: 1.0))
+        let launchSlot = ModelEntity(
+            mesh: .generateBox(width: 0.42, height: 0.15, depth: 0.025),
+            materials: [slotMaterial]
+        )
+        // +Z faces the shooter; this is the point from which the clay rises.
+        launchSlot.position = SIMD3<Float>(0, 0.02, 0.688)
+        trapHouse.addChild(launchSlot)
+        root.addChild(trapHouse)
 
         for station in TrapField.stations {
             let markerMesh = MeshResource.generateCylinder(height: 0.02, radius: 0.35)
-            var markerMaterial = SimpleMaterial()
+            var markerMaterial = UnlitMaterial()
             markerMaterial.color = .init(tint: .init(white: station.id == game.currentStationNumber ? 0.9 : 0.6, alpha: 1.0))
             let marker = ModelEntity(mesh: markerMesh, materials: [markerMaterial])
             marker.position = station.shooterPosition
@@ -906,6 +971,12 @@ private struct PracticeHUDView: View {
             Text("Warm-up: \(game.warmupLevel.displayName)")
                 .font(.system(size: 12, weight: .regular))
                 .foregroundStyle(.white.opacity(0.6))
+            if !game.lastResultText.isEmpty {
+                Text(game.lastResultText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(game.lastResultText.hasPrefix("HIT") ? .green : .white.opacity(0.8))
+                    .multilineTextAlignment(.trailing)
+            }
         }
         .padding(14)
         .background(.black.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
