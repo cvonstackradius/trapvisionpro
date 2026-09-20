@@ -488,27 +488,26 @@ final class GameState: ObservableObject {
 
         let aim = museManager.aimOriginAndForward ?? fallbackAimProvider?()
 
-        let distance = patterningDistance.meters
         let boardCenter = fieldRoot.position
-            + fieldRoot.orientation.act(SIMD3<Float>(0, PatterningDistance.boardHeight, -distance))
+            + fieldRoot.orientation.act(SIMD3<Float>(0, PatterningDistance.boardHeight, -patterningDistance.meters))
         let boardRight = fieldRoot.orientation.act(SIMD3<Float>(1, 0, 0))
-        let boardUp = SIMD3<Float>(0, 1, 0)
+        let boardUp = fieldRoot.orientation.act(SIMD3<Float>(0, 1, 0))
+        let boardNormal = fieldRoot.orientation.act(SIMD3<Float>(0, 0, 1))
 
-        var aimOffsetRight: Float = 0
-        var aimOffsetUp: Float = 0
         if let aim {
-            let forward = normalize(aim.forward)
-            let alongAim = dot(boardCenter - aim.origin, forward)
-            if alongAim > 0 {
-                let aimPointAtBoardDistance = aim.origin + forward * alongAim
-                let offsetFromCenter = aimPointAtBoardDistance - boardCenter
-                aimOffsetRight = dot(offsetFromCenter, boardRight)
-                aimOffsetUp = dot(offsetFromCenter, boardUp)
-            }
+            lastPatternImpacts = simulatePatterningShot(
+                aimOrigin: aim.origin,
+                aimForward: aim.forward,
+                boardCenter: boardCenter,
+                boardNormal: boardNormal,
+                boardRight: boardRight,
+                boardUp: boardUp
+            )
+        } else {
+            // Keep a useful, centered fallback if the scene has not yet
+            // supplied a head/Muse aim source.
+            lastPatternImpacts = simulatePatterningShot(distanceMeters: patterningDistance.meters)
         }
-
-        let scatter = simulatePatterningShot(distanceMeters: distance)
-        lastPatternImpacts = scatter.map { SIMD2<Float>($0.x + aimOffsetRight, $0.y + aimOffsetUp) }
         lastResultText = "Pattern at \(patterningDistance.displayName)"
     }
 

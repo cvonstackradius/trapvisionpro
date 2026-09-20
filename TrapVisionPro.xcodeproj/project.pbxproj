@@ -6,13 +6,8 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		64D2B511305E0EC100FAE1BE /* RealityKitContent in Frameworks */ = {isa = PBXBuildFile; productRef = 64D2B510305E0EC100FAE1BE /* RealityKitContent */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
 		64D2B50B305E0EC100FAE1BE /* TrapVisionPro.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TrapVisionPro.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		64D2B50F305E0EC100FAE1BE /* RealityKitContent */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = RealityKitContent; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -41,7 +36,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				64D2B511305E0EC100FAE1BE /* RealityKitContent in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -52,7 +46,6 @@
 			isa = PBXGroup;
 			children = (
 				64D2B50D305E0EC100FAE1BE /* TrapVisionPro */,
-				64D2B50E305E0EC100FAE1BE /* Packages */,
 				64D2B50C305E0EC100FAE1BE /* Products */,
 			);
 			sourceTree = "<group>";
@@ -63,14 +56,6 @@
 				64D2B50B305E0EC100FAE1BE /* TrapVisionPro.app */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		64D2B50E305E0EC100FAE1BE /* Packages */ = {
-			isa = PBXGroup;
-			children = (
-				64D2B50F305E0EC100FAE1BE /* RealityKitContent */,
-			);
-			path = Packages;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -92,9 +77,6 @@
 				64D2B50D305E0EC100FAE1BE /* TrapVisionPro */,
 			);
 			name = TrapVisionPro;
-			packageProductDependencies = (
-				64D2B510305E0EC100FAE1BE /* RealityKitContent */,
-			);
 			productName = TrapVisionPro;
 			productReference = 64D2B50B305E0EC100FAE1BE /* TrapVisionPro.app */;
 			productType = "com.apple.product-type.application";
@@ -187,6 +169,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
+				XROS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Debug;
 		};
@@ -227,6 +210,7 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 7;
+				XROS_DEPLOYMENT_TARGET = 26.0;
 			};
 			name = Release;
 		};
@@ -372,12 +356,6 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCSwiftPackageProductDependency section */
-		64D2B510305E0EC100FAE1BE /* RealityKitContent */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = RealityKitContent;
-		};
-/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 64D2B503305E0EC100FAE1BE /* Project object */;
 }

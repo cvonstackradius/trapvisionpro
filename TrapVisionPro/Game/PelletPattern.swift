@@ -211,3 +211,50 @@ func simulatePatterningShot(distanceMeters: Float) -> [SIMD2<Float>] {
 
     return impacts
 }
+
+/// Fires a pattern at an actual world-space target board. Each pellet is
+/// intersected with the board plane and returned in that board's local
+/// right/up coordinates. This matters when the player is off center or
+/// pitching/yawing the gun: a closest-point projection onto the aim ray
+/// looks plausible near the center but is not where pellets hit the board.
+func simulatePatterningShot(
+    aimOrigin: SIMD3<Float>,
+    aimForward: SIMD3<Float>,
+    boardCenter: SIMD3<Float>,
+    boardNormal: SIMD3<Float>,
+    boardRight: SIMD3<Float>,
+    boardUp: SIMD3<Float>
+) -> [SIMD2<Float>] {
+    let forward = normalize(aimForward)
+    let normal = normalize(boardNormal)
+    let right = length(cross(forward, SIMD3<Float>(0, 1, 0))) > 0.001
+        ? normalize(cross(SIMD3<Float>(0, 1, 0), forward))
+        : SIMD3<Float>(1, 0, 0)
+    let up = normalize(cross(forward, right))
+    let sigma = PelletPattern.angularSigmaDegrees * .pi / 180
+
+    var impacts: [SIMD2<Float>] = []
+    impacts.reserveCapacity(PelletPattern.pelletCount)
+
+    for _ in 0..<PelletPattern.pelletCount {
+        let u1 = Float.random(in: 0.0001...1)
+        let u2 = Float.random(in: 0...1)
+        let radius = sqrt(-2 * log(u1))
+        let angleX = radius * cos(2 * .pi * u2) * sigma
+        let angleY = radius * sin(2 * .pi * u2) * sigma
+        let pelletDirection = normalize(forward + right * tan(angleX) + up * tan(angleY))
+
+        let denominator = dot(pelletDirection, normal)
+        guard abs(denominator) > 0.0001 else { continue }
+        let distance = dot(boardCenter - aimOrigin, normal) / denominator
+        guard distance > 0 else { continue }
+
+        let flightTime = distance / PelletPattern.averagePelletSpeed
+        let drop = 0.5 * PelletPattern.gravity * flightTime * flightTime
+        let impact = aimOrigin + pelletDirection * distance - SIMD3<Float>(0, drop, 0)
+        let offset = impact - boardCenter
+        impacts.append(SIMD2<Float>(dot(offset, boardRight), dot(offset, boardUp)))
+    }
+
+    return impacts
+}

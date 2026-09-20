@@ -101,20 +101,23 @@ struct TrapRangeImmersiveView: View {
             game.museManager.attachAimVisual(museOverlay)
             museGunOverlay = museOverlay
 
-            // Real 3D shotgun model, swapped in once it loads (see
-            // loadRealShotgunEntity's doc comment for the license and the
-            // placement guess). The procedural gun stays visible — and is
-            // what actually ships if this ever fails to load — until then,
-            // so there's never a moment with no gun at all.
-            Task {
-                guard let model = await loadRealShotgunEntity() else { return }
-                gunReal.addChild(model.clone(recursive: true))
-                museReal.addChild(model.clone(recursive: true))
-                gunProcedural.isEnabled = false
-                gunReal.isEnabled = true
-                museProcedural.isEnabled = false
-                museReal.isEnabled = true
-            }
+            // Real 3D shotgun model — loading disabled for now. On-device
+            // testing found it rendering at a completely wrong angle while
+            // the actual aim/hit-ray was correct (confirmed independently
+            // on the patterning board), which pins this down as exactly
+            // what its own doc comment already flagged: the corrective
+            // rotation baked into `loadRealShotgunEntity` was a best guess
+            // from the mesh's raw bounding-box data, never actually
+            // confirmed on a headset, and it's wrong. Rather than keep
+            // guessing rotations blind, this stays off — showing the
+            // procedural gun, whose -Z-forward orientation is correct by
+            // construction, no guessing involved — until the real model's
+            // rotation can be tuned with someone actually looking at it.
+            // `loadRealShotgunEntity`, `gunReal`, and `museReal` are left
+            // in place so re-enabling this is a one-line change once that
+            // rotation is known.
+            _ = gunReal
+            _ = museReal
 
             let museMuzzleFlash = buildMuzzleFlash()
             museMuzzleFlash.position = SIMD3<Float>(0, 0.017, 0)

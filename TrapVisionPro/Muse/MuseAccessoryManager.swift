@@ -77,24 +77,37 @@ final class MuseAccessoryManager: ObservableObject {
         didSet { UserDefaults.standard.set(triggerSource.rawValue, forKey: Self.triggerSourceDefaultsKey) }
     }
 
-    /// User-calibrated rotation applied to every raw aim reading, to
-    /// account for exactly how the Muse sits inside a real gun-shaped
-    /// housing — the physical mounting can't be assumed to have the pen's
-    /// "aim" pose pointing exactly out the muzzle, so this closes that gap
-    /// empirically (see `addCalibrationSample`) instead of guessing.
-    /// Identity (no correction) until calibrated.
+    /// User-calibrated rotation applied to every raw aim reading. Together
+    /// with `muzzleOffset`, this defines the real barrel pose relative to
+    /// the Muse inside a gun-shaped housing.
     @Published private(set) var aimCorrection: simd_quatf = simd_quatf(real: 1, imag: .zero) {
-        didSet {
-            // Keep whatever's currently attached visually consistent with
-            // the correction, not just the hit-ray math — otherwise the
-            // rendered gun and where shots actually go would disagree.
-            aimVisual?.orientation = aimCorrection
-        }
+        didSet { applyAimVisualCorrection() }
     }
+
+    /// Local-space translation from the Muse's reported aim origin to the
+    /// real muzzle. Rotation-only calibration still leaves a close-range
+    /// parallax error whenever the Muse sits behind or below the muzzle.
+    @Published private(set) var muzzleOffset: SIMD3<Float> = .zero {
+        didSet { applyAimVisualCorrection() }
+    }
+
+    private struct CalibrationSample {
+        let rawTransform: float4x4
+        let targetWorldPosition: SIMD3<Float>
+    }
+
+    private var calibrationSamples: [CalibrationSample] = []
     private var calibrationSampleCount = 0
 
     private static let triggerSourceDefaultsKey = "MuseTriggerSource"
-    private static let calibrationDefaultsKeyPrefix = "MuseAimCorrection"
+    // "V2" because addCalibrationSample/aimOriginAndForward changed how
+    // this value is solved for and applied (local-space composition,
+    // matching the visual gun, instead of a world-space rotation that
+    // silently disagreed with it) — a value saved under the old math means
+    // something different now, so this intentionally starts everyone at a
+    // clean identity/zero instead of loading a stale, wrong correction.
+    private static let calibrationDefaultsKeyPrefix = "MuseAimCorrectionV2"
+    private static let muzzleOffsetDefaultsKeyPrefix = "MuseMuzzleOffsetV2"
 
     private func loadPreferences() {
         if let raw = UserDefaults.standard.string(forKey: Self.triggerSourceDefaultsKey),
@@ -110,6 +123,14 @@ final class MuseAccessoryManager: ObservableObject {
             let w = defaults.float(forKey: Self.calibrationDefaultsKeyPrefix + "W")
             aimCorrection = simd_quatf(ix: x, iy: y, iz: z, r: w)
         }
+        let offsetXKey = Self.muzzleOffsetDefaultsKeyPrefix + "X"
+        if defaults.object(forKey: offsetXKey) != nil {
+            muzzleOffset = SIMD3<Float>(
+                defaults.float(forKey: offsetXKey),
+                defaults.float(forKey: Self.muzzleOffsetDefaultsKeyPrefix + "Y"),
+                defaults.float(forKey: Self.muzzleOffsetDefaultsKeyPrefix + "Z")
+            )
+        }
     }
 
     private func saveCalibration() {
@@ -118,26 +139,37 @@ final class MuseAccessoryManager: ObservableObject {
         defaults.set(aimCorrection.imag.y, forKey: Self.calibrationDefaultsKeyPrefix + "Y")
         defaults.set(aimCorrection.imag.z, forKey: Self.calibrationDefaultsKeyPrefix + "Z")
         defaults.set(aimCorrection.real, forKey: Self.calibrationDefaultsKeyPrefix + "W")
+        defaults.set(muzzleOffset.x, forKey: Self.muzzleOffsetDefaultsKeyPrefix + "X")
+        defaults.set(muzzleOffset.y, forKey: Self.muzzleOffsetDefaultsKeyPrefix + "Y")
+        defaults.set(muzzleOffset.z, forKey: Self.muzzleOffsetDefaultsKeyPrefix + "Z")
     }
 
-    /// Records one calibration sample: given where the RAW (uncorrected)
-    /// aim anchor is currently pointing, and the world position the user
-    /// confirmed they were actually aiming at, computes the rotation that
-    /// would have made the raw direction point exactly there. Multiple
-    /// samples (e.g. from different head positions/distances) are blended
-    /// via iterative slerp — a simple, adequate running average for a
-    /// small number of samples, not a rigorous least-squares fit.
+    /// Records one calibration sample and estimates the complete muzzle
+    /// pose: a rotation plus local translation from the Muse to the muzzle.
+    /// The translation is solved as the least-squares point closest to the
+    /// calibrated aim rays across all samples, which removes the most
+    /// noticeable close-range parallax from an off-center mounting.
     /// Call `resetCalibration()` first if you want to start over rather
     /// than refine the existing correction.
     func addCalibrationSample(targetWorldPosition: SIMD3<Float>) -> Bool {
         guard let anchor = aimAnchor, anchor.isAnchored else { return false }
         let matrix = anchor.transformMatrix(relativeTo: nil)
         let origin = SIMD3<Float>(matrix.columns.3.x, matrix.columns.3.y, matrix.columns.3.z)
-        let rawForward = -SIMD3<Float>(matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z)
-        guard length(rawForward) > 0.0001 else { return false }
-        let desiredForward = targetWorldPosition - origin
-        guard length(desiredForward) > 0.01 else { return false }
-        let sampleCorrection = simd_quatf(from: normalize(rawForward), to: normalize(desiredForward))
+        let rotation = simd_float3x3(
+            SIMD3<Float>(matrix.columns.0.x, matrix.columns.0.y, matrix.columns.0.z),
+            SIMD3<Float>(matrix.columns.1.x, matrix.columns.1.y, matrix.columns.1.z),
+            SIMD3<Float>(matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z)
+        )
+        let desiredForwardWorld = targetWorldPosition - origin
+        guard length(desiredForwardWorld) > 0.01 else { return false }
+        // Solve for the correction in the anchor's LOCAL frame (undo its
+        // current world rotation with `rotation.transpose` first) so the
+        // result is a fixed mounting offset — the same convention
+        // `aimOriginAndForward` and the rendered gun both use — rather than
+        // a world-space rotation that would only happen to match this one
+        // sample's device orientation.
+        let localDesiredForward = normalize(rotation.transpose * desiredForwardWorld)
+        let sampleCorrection = simd_quatf(from: SIMD3<Float>(0, 0, -1), to: localDesiredForward)
 
         calibrationSampleCount += 1
         if calibrationSampleCount == 1 {
@@ -145,16 +177,62 @@ final class MuseAccessoryManager: ObservableObject {
         } else {
             aimCorrection = simd_slerp(aimCorrection, sampleCorrection, 1.0 / Float(calibrationSampleCount))
         }
+        calibrationSamples.append(CalibrationSample(rawTransform: matrix, targetWorldPosition: targetWorldPosition))
+        updateMuzzleOffset()
         saveCalibration()
         return true
     }
 
+    /// Finds the local point that lies closest to every calibrated target
+    /// ray. Each sample constrains the muzzle to a line; the accumulated
+    /// normal equations find their best common point in Muse-local space.
+    private func updateMuzzleOffset() {
+        guard calibrationSamples.count >= 2 else { return }
+
+        var normalMatrix = simd_float3x3(.zero, .zero, .zero)
+        var rightHandSide = SIMD3<Float>.zero
+
+        for sample in calibrationSamples {
+            let transform = sample.rawTransform
+            let origin = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
+            let rotation = simd_float3x3(
+                SIMD3<Float>(transform.columns.0.x, transform.columns.0.y, transform.columns.0.z),
+                SIMD3<Float>(transform.columns.1.x, transform.columns.1.y, transform.columns.1.z),
+                SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
+            )
+            // Same local-space composition as aimOriginAndForward — see
+            // that property's comment.
+            let direction = normalize(rotation * aimCorrection.act(SIMD3<Float>(0, 0, -1)))
+            let projection = matrix_identity_float3x3 - simd_float3x3(
+                direction * direction.x,
+                direction * direction.y,
+                direction * direction.z
+            )
+            let inverseRotation = rotation.transpose
+            normalMatrix += inverseRotation * projection * rotation
+            rightHandSide += inverseRotation * projection * (sample.targetWorldPosition - origin)
+        }
+
+        guard abs(simd_determinant(normalMatrix)) > 0.0001 else { return }
+        let estimatedOffset = simd_inverse(normalMatrix) * rightHandSide
+        // An unstable calibration should never put the virtual muzzle many
+        // meters from the tracked accessory. Keep a bad sample set from
+        // creating an unusable saved pose.
+        guard length(estimatedOffset) < 1.5 else { return }
+        muzzleOffset = estimatedOffset
+    }
+
     func resetCalibration() {
         aimCorrection = simd_quatf(real: 1, imag: .zero)
+        muzzleOffset = .zero
         calibrationSampleCount = 0
+        calibrationSamples.removeAll()
         let defaults = UserDefaults.standard
         for suffix in ["X", "Y", "Z", "W"] {
             defaults.removeObject(forKey: Self.calibrationDefaultsKeyPrefix + suffix)
+        }
+        for suffix in ["X", "Y", "Z"] {
+            defaults.removeObject(forKey: Self.muzzleOffsetDefaultsKeyPrefix + suffix)
         }
     }
 
@@ -198,8 +276,14 @@ final class MuseAccessoryManager: ObservableObject {
         // until the next time `aimCorrection` happens to change, which may
         // be never in a session where calibration was already done earlier.
         entity.orientation = aimCorrection
+        entity.position = muzzleOffset
         aimVisual = entity
         aimAnchor?.addChild(entity)
+    }
+
+    private func applyAimVisualCorrection() {
+        aimVisual?.orientation = aimCorrection
+        aimVisual?.position = muzzleOffset
     }
 
     /// Root entity you should add to your RealityKit scene once available.
@@ -267,7 +351,7 @@ final class MuseAccessoryManager: ObservableObject {
             object: nil, queue: .main
         ) { [weak self] notification in
             guard let stylus = notification.object as? GCStylus else { return }
-            Task { @MainActor in self?.handleStylusDisconnected(stylus) }
+            Task { @MainActor [weak self] in self?.handleStylusDisconnected(stylus) }
         }
 
         // Some accessories may enumerate as a full GCController with product
@@ -315,6 +399,7 @@ final class MuseAccessoryManager: ObservableObject {
         setupHaptics(stylus: stylus)
         observeInputs(device: stylus)
         isConnected = true
+        startAutoRetryLoop()
     }
 
     private func handleControllerConnected(_ controller: GCController) async {
@@ -331,6 +416,38 @@ final class MuseAccessoryManager: ObservableObject {
         // behavior from the stylus path.
         observeInputs(device: controller)
         isConnected = true
+        startAutoRetryLoop()
+    }
+
+    private var autoRetryTask: Task<Void, Never>?
+
+    /// The whole reason a manual "Retry Tracking" button exists at all:
+    /// accessory-tracking authorization frequently doesn't settle on the
+    /// very first connection attempt, but DOES succeed a few seconds later
+    /// with no user action other than pressing that button again. Requiring
+    /// someone to know that button exists, find it (previously only on the
+    /// Home screen, then also added in-range after Home's retry didn't
+    /// survive the Home→Range transition), and press it — possibly more
+    /// than once — is exactly the "how do I even get this working" dead end
+    /// reported this session. This automates the same retry the button
+    /// performs: every 1.5s for the first ~15s after connecting, unless/
+    /// until real tracking is confirmed live (`isAimTrackingLive`, which
+    /// only flips true from an actual per-frame anchor check — see
+    /// `pollOnce()` — not just from an anchor merely being created). The
+    /// manual button stays too, both as a way to force an immediate retry
+    /// without waiting, and as a safety net if this loop's window closes
+    /// before tracking happens to settle.
+    private func startAutoRetryLoop() {
+        autoRetryTask?.cancel()
+        autoRetryTask = Task { @MainActor [weak self] in
+            for _ in 0..<10 {
+                guard let self, !Task.isCancelled else { return }
+                if self.isAimTrackingLive { return }
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if Task.isCancelled { return }
+                await self.retryAccessoryTracking()
+            }
+        }
     }
 
     /// Re-runs the SpatialTrackingSession check for accessory-anchor
@@ -367,6 +484,7 @@ final class MuseAccessoryManager: ObservableObject {
 
     private func handleStylusDisconnected(_ stylus: GCStylus) {
         guard self.stylus === stylus else { return }
+        autoRetryTask?.cancel()
         self.stylus = nil
         isConnected = false
         isAimTrackingLive = false
@@ -403,10 +521,13 @@ final class MuseAccessoryManager: ObservableObject {
             self.aimAnchor = anchor
             if let aimVisual {
                 aimVisual.orientation = aimCorrection
+                aimVisual.position = muzzleOffset
                 anchor.addChild(aimVisual)
             }
             aimStatus = "Aim anchor created — tracking live"
-            isAimTrackingLive = true
+            // Creating an anchor is not the same as receiving a valid pose.
+            // `pollOnce()` publishes the actual isAnchored state each frame.
+            isAimTrackingLive = false
         } catch {
             aimStatus = "Anchor source failed: \(error.localizedDescription)"
             isAimTrackingLive = false
@@ -531,11 +652,21 @@ final class MuseAccessoryManager: ObservableObject {
         wasControllerButtonPressed[name] = isPressed
     }
 
-    /// Kept as a no-op for source compatibility — `GameState.tick(dt:)`
-    /// still calls this once per frame, but actual stylus readings now
-    /// arrive via `observeInputs`'s queued handler above, which is the
-    /// correct/documented way to read a GCStylus's input.
-    func pollOnce() {}
+    /// Publishes real accessory-anchor availability for the view. Input is
+    /// event-driven, but anchoring can change independently when tracking
+    /// resolves or drops, so this small per-frame check prevents the HUD
+    /// from claiming the Muse gun is live before it has a valid transform.
+    func pollOnce() {
+        let live = aimAnchor?.isAnchored ?? false
+        if isAimTrackingLive != live {
+            isAimTrackingLive = live
+            if live {
+                aimStatus = "Aim anchor tracking live"
+            } else if aimAnchor != nil {
+                aimStatus = "Aim anchor waiting for tracking"
+            }
+        }
+    }
 
     // MARK: Haptics
 
@@ -614,7 +745,24 @@ final class MuseAccessoryManager: ObservableObject {
     var aimOriginAndForward: (origin: SIMD3<Float>, forward: SIMD3<Float>)? {
         guard let matrix = aimWorldMatrix else { return nil }
         let origin = SIMD3<Float>(matrix.columns.3.x, matrix.columns.3.y, matrix.columns.3.z)
-        let rawForward = -SIMD3<Float>(matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z)
-        return (origin, aimCorrection.act(rawForward))
+        let rotation = simd_float3x3(
+            SIMD3<Float>(matrix.columns.0.x, matrix.columns.0.y, matrix.columns.0.z),
+            SIMD3<Float>(matrix.columns.1.x, matrix.columns.1.y, matrix.columns.1.z),
+            SIMD3<Float>(matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z)
+        )
+        // aimCorrection is a fixed LOCAL-space offset — how the barrel sits
+        // inside the housing relative to the Muse's own frame, independent
+        // of whichever way the whole device currently points. It must
+        // compose the same way the rendered gun does (the anchor's world
+        // rotation, THEN the local correction, i.e. `rotation * correction`
+        // acting on local -Z) — not as a plain world-space rotation of the
+        // raw forward vector. Those two only ever agreed while aimCorrection
+        // was still identity (before calibration did anything); the moment
+        // a real correction existed, the visual gun and this hit-ray pointed
+        // in different directions, which is exactly the "looks aimed right,
+        // nothing breaks" bug reported after the first real calibration.
+        let localForward = aimCorrection.act(SIMD3<Float>(0, 0, -1))
+        let forward = rotation * localForward
+        return (origin + rotation * muzzleOffset, forward)
     }
 }
