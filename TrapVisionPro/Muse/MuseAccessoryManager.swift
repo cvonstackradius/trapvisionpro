@@ -16,6 +16,28 @@ import RealityKit
 import ARKit
 import CoreHaptics
 import Combine
+import simd
+
+/// Which physical control fires the shot during normal play. Defaults to
+/// "any" (the behavior since Build 13) since not everyone has identified
+/// their specific hardware's mapping yet — but once you've watched
+/// `lastInputEvent` and know which one is real, picking it here stops the
+/// other two controls from also firing (e.g. brushing the tip while
+/// gripping the housing shouldn't count as a shot).
+enum MuseTriggerSource: String, CaseIterable, Identifiable {
+    case any, primaryButton, secondaryButton, tip
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .any: return "Any Control"
+        case .primaryButton: return "Primary Button"
+        case .secondaryButton: return "Secondary Button"
+        case .tip: return "Tip"
+        }
+    }
+}
 
 @MainActor
 final class MuseAccessoryManager: ObservableObject {
@@ -28,11 +50,113 @@ final class MuseAccessoryManager: ObservableObject {
     @Published var lastSecondaryPressure: Float = 0
     @Published var isPrimaryButtonPressed: Bool = false
 
+    /// The most recent physical control that actually reached the Game
+    /// Controller framework, by name (e.g. "Primary button pressed") —
+    /// visible on-screen since we have no reliable Xcode console access on
+    /// this device, and it directly answers "which control does the Muse
+    /// actually report" without guessing.
+    @Published var lastInputEvent: String = "No input yet"
+
     /// Plain-English state of accessory aim-tracking, meant to be shown
     /// directly on-screen (HomeView) since we have no reliable way to reach
     /// an Xcode console on this device yet. Every branch that decides
     /// whether the tilt-tracked gun will work updates this.
     @Published var aimStatus: String = "Not started"
+
+    /// True only while a real aim anchor exists and is actively tracking —
+    /// distinct from `aimStatus`'s free-text (meant for humans to read),
+    /// this is what view code should actually branch on to decide whether
+    /// to show the tracked gun or the head-locked fallback.
+    @Published private(set) var isAimTrackingLive: Bool = false
+
+    /// Which control fires the shot — see the type's doc comment.
+    /// Persisted so a choice survives app relaunches (not necessarily full
+    /// reinstalls, same caveat as every other permission/preference this
+    /// app has hit this session).
+    @Published var triggerSource: MuseTriggerSource {
+        didSet { UserDefaults.standard.set(triggerSource.rawValue, forKey: Self.triggerSourceDefaultsKey) }
+    }
+
+    /// User-calibrated rotation applied to every raw aim reading, to
+    /// account for exactly how the Muse sits inside a real gun-shaped
+    /// housing — the physical mounting can't be assumed to have the pen's
+    /// "aim" pose pointing exactly out the muzzle, so this closes that gap
+    /// empirically (see `addCalibrationSample`) instead of guessing.
+    /// Identity (no correction) until calibrated.
+    @Published private(set) var aimCorrection: simd_quatf = simd_quatf(real: 1, imag: .zero) {
+        didSet {
+            // Keep whatever's currently attached visually consistent with
+            // the correction, not just the hit-ray math — otherwise the
+            // rendered gun and where shots actually go would disagree.
+            aimVisual?.orientation = aimCorrection
+        }
+    }
+    private var calibrationSampleCount = 0
+
+    private static let triggerSourceDefaultsKey = "MuseTriggerSource"
+    private static let calibrationDefaultsKeyPrefix = "MuseAimCorrection"
+
+    private func loadPreferences() {
+        if let raw = UserDefaults.standard.string(forKey: Self.triggerSourceDefaultsKey),
+           let saved = MuseTriggerSource(rawValue: raw) {
+            triggerSource = saved
+        }
+        let defaults = UserDefaults.standard
+        let xKey = Self.calibrationDefaultsKeyPrefix + "X"
+        if defaults.object(forKey: xKey) != nil {
+            let x = defaults.float(forKey: xKey)
+            let y = defaults.float(forKey: Self.calibrationDefaultsKeyPrefix + "Y")
+            let z = defaults.float(forKey: Self.calibrationDefaultsKeyPrefix + "Z")
+            let w = defaults.float(forKey: Self.calibrationDefaultsKeyPrefix + "W")
+            aimCorrection = simd_quatf(ix: x, iy: y, iz: z, r: w)
+        }
+    }
+
+    private func saveCalibration() {
+        let defaults = UserDefaults.standard
+        defaults.set(aimCorrection.imag.x, forKey: Self.calibrationDefaultsKeyPrefix + "X")
+        defaults.set(aimCorrection.imag.y, forKey: Self.calibrationDefaultsKeyPrefix + "Y")
+        defaults.set(aimCorrection.imag.z, forKey: Self.calibrationDefaultsKeyPrefix + "Z")
+        defaults.set(aimCorrection.real, forKey: Self.calibrationDefaultsKeyPrefix + "W")
+    }
+
+    /// Records one calibration sample: given where the RAW (uncorrected)
+    /// aim anchor is currently pointing, and the world position the user
+    /// confirmed they were actually aiming at, computes the rotation that
+    /// would have made the raw direction point exactly there. Multiple
+    /// samples (e.g. from different head positions/distances) are blended
+    /// via iterative slerp — a simple, adequate running average for a
+    /// small number of samples, not a rigorous least-squares fit.
+    /// Call `resetCalibration()` first if you want to start over rather
+    /// than refine the existing correction.
+    func addCalibrationSample(targetWorldPosition: SIMD3<Float>) -> Bool {
+        guard let anchor = aimAnchor, anchor.isAnchored else { return false }
+        let matrix = anchor.transformMatrix(relativeTo: nil)
+        let origin = SIMD3<Float>(matrix.columns.3.x, matrix.columns.3.y, matrix.columns.3.z)
+        let rawForward = -SIMD3<Float>(matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z)
+        guard length(rawForward) > 0.0001 else { return false }
+        let desiredForward = targetWorldPosition - origin
+        guard length(desiredForward) > 0.01 else { return false }
+        let sampleCorrection = simd_quatf(from: normalize(rawForward), to: normalize(desiredForward))
+
+        calibrationSampleCount += 1
+        if calibrationSampleCount == 1 {
+            aimCorrection = sampleCorrection
+        } else {
+            aimCorrection = simd_slerp(aimCorrection, sampleCorrection, 1.0 / Float(calibrationSampleCount))
+        }
+        saveCalibration()
+        return true
+    }
+
+    func resetCalibration() {
+        aimCorrection = simd_quatf(real: 1, imag: .zero)
+        calibrationSampleCount = 0
+        let defaults = UserDefaults.standard
+        for suffix in ["X", "Y", "Z", "W"] {
+            defaults.removeObject(forKey: Self.calibrationDefaultsKeyPrefix + suffix)
+        }
+    }
 
     /// Fires once per discrete press of ANY control on the device (tip,
     /// primary button, or secondary button — debounced per-control, never
@@ -49,6 +173,11 @@ final class MuseAccessoryManager: ObservableObject {
     /// doesn't need to change if a real menu control shows up later.
     let menuButtonPressed = PassthroughSubject<Void, Never>()
 
+    init() {
+        self.triggerSource = .any
+        loadPreferences()
+    }
+
     /// The RealityKit anchor tracking the Muse's "aim" pose. Attach your
     /// virtual barrel/sight/reticle entity as a child of this anchor.
     private(set) var aimAnchor: AnchorEntity?
@@ -64,6 +193,11 @@ final class MuseAccessoryManager: ObservableObject {
     /// connected — it attaches the moment `aimAnchor` exists.
     func attachAimVisual(_ entity: Entity) {
         aimVisual?.removeFromParent()
+        // Apply the current calibration immediately — without this, a
+        // freshly (re)attached visual would render at the RAW orientation
+        // until the next time `aimCorrection` happens to change, which may
+        // be never in a session where calibration was already done earlier.
+        entity.orientation = aimCorrection
         aimVisual = entity
         aimAnchor?.addChild(entity)
     }
@@ -235,6 +369,7 @@ final class MuseAccessoryManager: ObservableObject {
         guard self.stylus === stylus else { return }
         self.stylus = nil
         isConnected = false
+        isAimTrackingLive = false
         deviceName = "No accessory connected"
         aimAnchor?.removeFromParent()
         aimAnchor = nil
@@ -255,6 +390,7 @@ final class MuseAccessoryManager: ObservableObject {
             print("TrapVisionPro: accessory locations available: \(source.accessoryLocations)")
             guard let location = source.locationName(named: "aim") else {
                 aimStatus = "Device has no 'aim' location — fixed gun"
+                isAimTrackingLive = false
                 print("TrapVisionPro: accessory has no 'aim' location, cannot anchor.")
                 return
             }
@@ -266,11 +402,14 @@ final class MuseAccessoryManager: ObservableObject {
             accessoryRoot.addChild(anchor)
             self.aimAnchor = anchor
             if let aimVisual {
+                aimVisual.orientation = aimCorrection
                 anchor.addChild(aimVisual)
             }
             aimStatus = "Aim anchor created — tracking live"
+            isAimTrackingLive = true
         } catch {
             aimStatus = "Anchor source failed: \(error.localizedDescription)"
+            isAimTrackingLive = false
             print("TrapVisionPro: failed to create accessory anchoring source: \(error)")
         }
     }
@@ -306,13 +445,13 @@ final class MuseAccessoryManager: ObservableObject {
         }
 
         input.buttons[.stylusPrimaryButton]?.pressedInput.pressedDidChangeHandler = { [weak self] _, _, pressed in
-            Task { @MainActor [weak self] in self?.handleDiscreteControl(pressed: pressed, isPrimary: true) }
+            Task { @MainActor [weak self] in self?.handleDiscreteControl(pressed: pressed, isPrimary: true, source: "Primary button") }
         }
         input.buttons[.stylusSecondaryButton]?.pressedInput.pressedDidChangeHandler = { [weak self] _, _, pressed in
-            Task { @MainActor [weak self] in self?.handleDiscreteControl(pressed: pressed, isPrimary: false) }
+            Task { @MainActor [weak self] in self?.handleDiscreteControl(pressed: pressed, isPrimary: false, source: "Secondary button") }
         }
         input.buttons[.stylusTip]?.pressedInput.pressedDidChangeHandler = { [weak self] _, _, pressed in
-            Task { @MainActor [weak self] in self?.handleDiscreteControl(pressed: pressed, isPrimary: false) }
+            Task { @MainActor [weak self] in self?.handleDiscreteControl(pressed: pressed, isPrimary: false, source: "Tip") }
         }
         // Continuous pressure values, purely for the on-screen debug
         // readout — not used for trigger edge-detection anymore.
@@ -324,13 +463,26 @@ final class MuseAccessoryManager: ObservableObject {
         }
     }
 
-    /// Any of the three stylus controls firing a press (not release) counts
-    /// as a trigger pull — see the type-level comment on `triggerPulled`.
-    private func handleDiscreteControl(pressed: Bool, isPrimary: Bool) {
+    /// Which control(s) fire the trigger depends on `triggerSource` — see
+    /// that type's doc comment. `.any` (the default, and the only option
+    /// that behaved this way before trigger mapping existed) still lets
+    /// every control fire.
+    private func handleDiscreteControl(pressed: Bool, isPrimary: Bool, source: String) {
         if isPrimary { isPrimaryButtonPressed = pressed }
         guard pressed else { return }
+        lastInputEvent = "\(source) pressed"
+        guard matchesTriggerSource(source) else { return }
         triggerPulled.send()
         playShotHaptic()
+    }
+
+    private func matchesTriggerSource(_ source: String) -> Bool {
+        switch triggerSource {
+        case .any: return true
+        case .primaryButton: return source == "Primary button"
+        case .secondaryButton: return source == "Secondary button"
+        case .tip: return source == "Tip"
+        }
     }
 
     /// Tracks the pressed state of every button on a plain GCController's
@@ -359,8 +511,22 @@ final class MuseAccessoryManager: ObservableObject {
         isPrimaryButtonPressed = isPressed
         let wasPressed = wasControllerButtonPressed[name] ?? false
         if isPressed && !wasPressed {
-            triggerPulled.send()
-            playShotHaptic()
+            lastInputEvent = "\(name) pressed"
+            // GCController button names are arbitrary strings (no fixed
+            // "primary/secondary/tip" the way GCStylus has), so a specific
+            // triggerSource selection is matched loosely by name rather
+            // than exactly — `.any` always fires regardless.
+            let matches: Bool
+            switch triggerSource {
+            case .any: matches = true
+            case .primaryButton: matches = name.localizedCaseInsensitiveContains("primary")
+            case .secondaryButton: matches = name.localizedCaseInsensitiveContains("secondary")
+            case .tip: matches = name.localizedCaseInsensitiveContains("tip")
+            }
+            if matches {
+                triggerPulled.send()
+                playShotHaptic()
+            }
         }
         wasControllerButtonPressed[name] = isPressed
     }
@@ -425,14 +591,30 @@ final class MuseAccessoryManager: ObservableObject {
         triggerPulled.send()
     }
 
-    /// The Muse's current world-space aim transform, if connected & tracked.
-    /// Explicitly resolved relative to nil (the scene root) so it stays
-    /// correct regardless of any transform applied higher up the hierarchy
-    /// (e.g. the field repositioning itself under the player per station,
-    /// or the recoil/shake animations) — those must never affect where the
-    /// Muse itself is actually aiming.
+    /// The Muse's RAW current world-space aim transform (no calibration
+    /// applied), if connected & tracked. Explicitly resolved relative to
+    /// nil (the scene root) so it stays correct regardless of any
+    /// transform applied higher up the hierarchy (e.g. the field
+    /// repositioning itself under the player per station, or the
+    /// recoil/shake animations) — those must never affect where the Muse
+    /// itself is actually aiming. Used directly only by calibration
+    /// sampling; gameplay should use `aimOriginAndForward` instead, which
+    /// applies the calibration correction.
     var aimWorldMatrix: float4x4? {
         guard let aimAnchor, aimAnchor.isAnchored else { return nil }
         return aimAnchor.transformMatrix(relativeTo: nil)
+    }
+
+    /// The Muse's current world-space aim origin/forward, WITH calibration
+    /// applied (identity rotation if never calibrated, so this is safe to
+    /// use unconditionally). This is what actual gameplay (hit-testing,
+    /// "am I aiming at the trap house") should read — `aimWorldMatrix` is
+    /// the uncorrected raw reading, kept around only for calibration
+    /// sampling itself.
+    var aimOriginAndForward: (origin: SIMD3<Float>, forward: SIMD3<Float>)? {
+        guard let matrix = aimWorldMatrix else { return nil }
+        let origin = SIMD3<Float>(matrix.columns.3.x, matrix.columns.3.y, matrix.columns.3.z)
+        let rawForward = -SIMD3<Float>(matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z)
+        return (origin, aimCorrection.act(rawForward))
     }
 }

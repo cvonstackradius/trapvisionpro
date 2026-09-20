@@ -32,6 +32,37 @@ enum AppMode {
     /// at longer distances to compensate for real drop), the way you'd
     /// pattern a real shotgun on paper.
     case patterning
+    /// Guided Muse calibration — see CalibrationTarget's doc comment.
+    case calibration
+}
+
+/// One calibration step: aim the physical Muse (however it ends up
+/// mounted) at this target and fire. Three targets at different positions
+/// so the resulting correction isn't just fit to one direction. Made fun
+/// on purpose (see MuseAccessoryManager.addCalibrationSample) rather than
+/// a dry settings screen — you're aiming and shooting things either way,
+/// might as well be a little game.
+enum CalibrationTarget: Int, CaseIterable {
+    case apple = 0, pumpkin, watermelon
+
+    var displayName: String {
+        switch self {
+        case .apple: return "Apple"
+        case .pumpkin: return "Pumpkin"
+        case .watermelon: return "Watermelon"
+        }
+    }
+
+    /// Position in fieldRoot-local space — matches how the patterning
+    /// board and trap house are positioned, so recentering carries these
+    /// along correctly too.
+    var localPosition: SIMD3<Float> {
+        switch self {
+        case .apple: return SIMD3<Float>(0, 1.5, -3)
+        case .pumpkin: return SIMD3<Float>(-1.1, 1.4, -3)
+        case .watermelon: return SIMD3<Float>(1.1, 1.3, -3)
+        }
+    }
 }
 
 /// Distances offered on the patterning range, in yards — spanning inside
@@ -48,6 +79,12 @@ enum PatterningDistance: Int, CaseIterable, Identifiable {
     var id: Int { rawValue }
     var displayName: String { "\(rawValue) yd" }
     var meters: Float { Float(rawValue) * 0.9144 }
+
+    /// Height (meters, in fieldRoot's local space) the board is rendered
+    /// at — shared with TrapRangeImmersiveView.buildPatterningBoard's
+    /// positioning so GameState's aim-error math and the View's actual
+    /// board placement can never drift apart.
+    static let boardHeight: Float = 1.4
 }
 
 /// How much horizontal angle a pulled clay can fly at — narrower than the
@@ -131,6 +168,15 @@ final class GameState: ObservableObject {
     /// always shows just the most recent pattern.
     @Published var lastPatternImpacts: [SIMD2<Float>] = []
 
+    /// Which of the three calibration targets is current — see
+    /// CalibrationTarget's doc comment.
+    @Published var calibrationTargetIndex: Int = 0
+    @Published var calibrationComplete: Bool = false
+    /// Set true for a brief moment whenever a sample is recorded, so the
+    /// view can trigger the "blast apart" effect on the current target —
+    /// cleared again immediately after the view consumes it.
+    @Published var calibrationTargetJustHit: Bool = false
+
     /// Live diagnostics mirrored straight from MuseAccessoryManager so
     /// HomeView (and the simple Muse Debug scene) can show ground truth
     /// on-screen — there's no reliable way to reach an Xcode console on
@@ -139,7 +185,13 @@ final class GameState: ObservableObject {
     @Published var museTipPressure: Float = 0
     @Published var museSecondaryPressure: Float = 0
     @Published var musePrimaryPressed: Bool = false
+    @Published var museLastInputEvent: String = "No input yet"
     @Published var museTriggerPullCount: Int = 0
+    /// True only while a real Muse aim anchor is live-tracking — the View
+    /// uses this (not just `museConnected`) to decide whether to show the
+    /// head-locked fallback gun or the Muse-tracked one, per
+    /// MuseAccessoryManager.isAimTrackingLive's doc comment.
+    @Published var museIsTrackingLive: Bool = false
 
     /// Mirrors voiceListener.authorizationDenied so HomeView can show it —
     /// previously read directly off the nested VoiceCommandListener, which
@@ -246,6 +298,8 @@ final class GameState: ObservableObject {
         museManager.$lastTipPressure.sink { [weak self] in self?.museTipPressure = $0 }.store(in: &cancellables)
         museManager.$lastSecondaryPressure.sink { [weak self] in self?.museSecondaryPressure = $0 }.store(in: &cancellables)
         museManager.$isPrimaryButtonPressed.sink { [weak self] in self?.musePrimaryPressed = $0 }.store(in: &cancellables)
+        museManager.$lastInputEvent.sink { [weak self] in self?.museLastInputEvent = $0 }.store(in: &cancellables)
+        museManager.$isAimTrackingLive.sink { [weak self] in self?.museIsTrackingLive = $0 }.store(in: &cancellables)
         voiceListener.$authorizationDenied.sink { [weak self] in self?.voiceAuthorizationDenied = $0 }.store(in: &cancellables)
 
         shotAudioPlayer.bind(to: shotFired)
@@ -283,6 +337,19 @@ final class GameState: ObservableObject {
         mode = .patterning
         resetScoreState()
         lastPatternImpacts = []
+    }
+
+    /// Enter guided calibration — see CalibrationTarget's doc comment.
+    /// Clears any previous calibration first, since walking through all
+    /// three targets again is meant to replace it, not refine it further
+    /// (refining an old, possibly-wrong correction could make things
+    /// worse instead of better).
+    func startCalibration() {
+        mode = .calibration
+        resetScoreState()
+        calibrationTargetIndex = 0
+        calibrationComplete = false
+        museManager.resetCalibration()
     }
 
     private func resetScoreState() {
@@ -377,6 +444,10 @@ final class GameState: ObservableObject {
     /// always-visible Exit button on the bottom bar, or long-press
     /// look+pinch — so this gesture is free for warm-up cycling instead.
     private func handleMuseTrigger() {
+        if mode == .calibration {
+            fireCalibrationShot()
+            return
+        }
         if mode == .patterning {
             firePatterningShot()
             return
@@ -404,11 +475,73 @@ final class GameState: ObservableObject {
 
     /// Fires one full pellet pattern at the stationary patterning target —
     /// no pull step, no clay, just "where did that shot actually land."
+    /// Previously ignored your actual aim entirely (always simulated a
+    /// dead-center shot plus scatter), which made patterning useless for
+    /// its whole purpose — it couldn't show bad aim because it never
+    /// looked at your aim. Now computes exactly how far off dead-center
+    /// your real aim ray is at the board's distance, and offsets the whole
+    /// scatter pattern by that — the same aim direction Practice/Round
+    /// shots already use (Muse if tracking, otherwise fallback).
     private func firePatterningShot() {
         guard !isPaused else { return }
         shotFired.send()
-        lastPatternImpacts = simulatePatterningShot(distanceMeters: patterningDistance.meters)
+
+        let aim = museManager.aimOriginAndForward ?? fallbackAimProvider?()
+
+        let distance = patterningDistance.meters
+        let boardCenter = fieldRoot.position
+            + fieldRoot.orientation.act(SIMD3<Float>(0, PatterningDistance.boardHeight, -distance))
+        let boardRight = fieldRoot.orientation.act(SIMD3<Float>(1, 0, 0))
+        let boardUp = SIMD3<Float>(0, 1, 0)
+
+        var aimOffsetRight: Float = 0
+        var aimOffsetUp: Float = 0
+        if let aim {
+            let forward = normalize(aim.forward)
+            let alongAim = dot(boardCenter - aim.origin, forward)
+            if alongAim > 0 {
+                let aimPointAtBoardDistance = aim.origin + forward * alongAim
+                let offsetFromCenter = aimPointAtBoardDistance - boardCenter
+                aimOffsetRight = dot(offsetFromCenter, boardRight)
+                aimOffsetUp = dot(offsetFromCenter, boardUp)
+            }
+        }
+
+        let scatter = simulatePatterningShot(distanceMeters: distance)
+        lastPatternImpacts = scatter.map { SIMD2<Float>($0.x + aimOffsetRight, $0.y + aimOffsetUp) }
         lastResultText = "Pattern at \(patterningDistance.displayName)"
+    }
+
+    /// Current calibration target's actual world position — field-local
+    /// per `CalibrationTarget.localPosition`, transformed the same way the
+    /// trap house and patterning board are, so recentering carries it
+    /// along correctly.
+    var calibrationTargetWorldPosition: SIMD3<Float> {
+        let target = CalibrationTarget.allCases[min(calibrationTargetIndex, CalibrationTarget.allCases.count - 1)]
+        return fieldRoot.position + fieldRoot.orientation.act(target.localPosition)
+    }
+
+    /// Records one calibration sample against the CURRENT target, then
+    /// advances — three targets total (see CalibrationTarget), each from a
+    /// meaningfully different direction so the resulting correction isn't
+    /// just fit to a single line of sight.
+    private func fireCalibrationShot() {
+        guard !isPaused, !calibrationComplete else { return }
+        let recorded = museManager.addCalibrationSample(targetWorldPosition: calibrationTargetWorldPosition)
+        guard recorded else {
+            lastResultText = "Calibration needs live Muse tracking to record a sample."
+            return
+        }
+        shotFired.send()
+        calibrationTargetJustHit = true
+
+        let nextIndex = calibrationTargetIndex + 1
+        if nextIndex >= CalibrationTarget.allCases.count {
+            calibrationComplete = true
+            lastResultText = "Calibration complete!"
+        } else {
+            calibrationTargetIndex = nextIndex
+        }
     }
 
     /// How close (meters) an aim ray has to pass to the trap house's center
@@ -416,15 +549,7 @@ final class GameState: ObservableObject {
     private static let trapHouseAimRadius: Float = 0.6
 
     private func isAimedAtTrapHouse() -> Bool {
-        let aim: (origin: SIMD3<Float>, forward: SIMD3<Float>)?
-        if let worldMatrix = museManager.aimWorldMatrix {
-            let origin = SIMD3<Float>(worldMatrix.columns.3.x, worldMatrix.columns.3.y, worldMatrix.columns.3.z)
-            let forward = -SIMD3<Float>(worldMatrix.columns.2.x, worldMatrix.columns.2.y, worldMatrix.columns.2.z)
-            aim = (origin, forward)
-        } else {
-            aim = fallbackAimProvider?()
-        }
-        guard let aim else { return false }
+        guard let aim = museManager.aimOriginAndForward ?? fallbackAimProvider?() else { return false }
 
         // fieldRoot can now rotate too (recenterField), so the house's
         // world position needs the rotation applied to its field-local
@@ -465,13 +590,11 @@ final class GameState: ObservableObject {
         guard !isPaused else { return }
         shotFired.send()
         guard let clay = activeClay else { return }
-        guard let worldMatrix = museManager.aimWorldMatrix else {
+        guard let aim = museManager.aimOriginAndForward else {
             evaluateAndScore(clayFromFallback: clay)
             return
         }
-        let origin = SIMD3<Float>(worldMatrix.columns.3.x, worldMatrix.columns.3.y, worldMatrix.columns.3.z)
-        let forward = -SIMD3<Float>(worldMatrix.columns.2.x, worldMatrix.columns.2.y, worldMatrix.columns.2.z)
-        let result = simulatePelletShot(aimOrigin: origin, aimForward: forward, clay: clay,
+        let result = simulatePelletShot(aimOrigin: aim.origin, aimForward: aim.forward, clay: clay,
                                          hitRadiusMultiplier: difficulty.hitRadiusMultiplier)
         resolveShot(result: result, clay: clay)
     }

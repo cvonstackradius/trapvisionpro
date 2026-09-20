@@ -21,6 +21,7 @@
 
 import SwiftUI
 import RealityKit
+import GameController
 import Combine
 import simd
 
@@ -41,6 +42,9 @@ struct TrapRangeImmersiveView: View {
     @State private var patterningImpactsContainer: Entity?
     @State private var lastRenderedPatterningDistance: PatterningDistance?
     @State private var lastRenderedImpacts: [SIMD2<Float>] = []
+    @State private var calibrationGroup: Entity?
+    @State private var calibrationTargetEntities: [Entity] = []
+    @State private var lastRenderedCalibrationIndex: Int = 0
     @State private var shotSubscription: AnyCancellable?
     @State private var recoilTask: Task<Void, Never>?
     @State private var shakeTask: Task<Void, Never>?
@@ -68,6 +72,10 @@ struct TrapRangeImmersiveView: View {
             board.addChild(impactsContainer)
             patterningImpactsContainer = impactsContainer
 
+            let calGroup = buildCalibrationTargets()
+            game.fieldRoot.addChild(calGroup)
+            calibrationGroup = calGroup
+
             // World-anchored scoreboard: a physical sign standing to the
             // side of the trap house, showing score + MISS flash. It does
             // NOT move with your gaze — you glance at it the way you'd
@@ -79,7 +87,7 @@ struct TrapRangeImmersiveView: View {
             }
 
             let headAnchor = AnchorEntity(.head)
-            let gunGroup = buildFallbackGunOverlay()
+            let (gunGroup, gunProcedural, gunReal) = buildFallbackGunOverlay()
             headAnchor.addChild(gunGroup)
             content.add(headAnchor)
             fallbackGunAnchor = headAnchor
@@ -89,9 +97,24 @@ struct TrapRangeImmersiveView: View {
             // Full immersion's stand-in for the real gun (which passthrough
             // would otherwise show) — tracks the Muse's real-world aim
             // point instead of the head.
-            let museOverlay = buildMuseTrackedGunOverlay()
+            let (museOverlay, museProcedural, museReal) = buildMuseTrackedGunOverlay()
             game.museManager.attachAimVisual(museOverlay)
             museGunOverlay = museOverlay
+
+            // Real 3D shotgun model, swapped in once it loads (see
+            // loadRealShotgunEntity's doc comment for the license and the
+            // placement guess). The procedural gun stays visible — and is
+            // what actually ships if this ever fails to load — until then,
+            // so there's never a moment with no gun at all.
+            Task {
+                guard let model = await loadRealShotgunEntity() else { return }
+                gunReal.addChild(model.clone(recursive: true))
+                museReal.addChild(model.clone(recursive: true))
+                gunProcedural.isEnabled = false
+                gunReal.isEnabled = true
+                museProcedural.isEnabled = false
+                museReal.isEnabled = true
+            }
 
             let museMuzzleFlash = buildMuzzleFlash()
             museMuzzleFlash.position = SIMD3<Float>(0, 0.017, 0)
@@ -108,6 +131,13 @@ struct TrapRangeImmersiveView: View {
                 practiceHud.position = SIMD3<Float>(0.22, -0.18, -0.6)
                 headAnchor.addChild(practiceHud)
                 practiceHudAnchor = practiceHud
+            }
+
+            // Calibration-only head-locked HUD — hidden outside .calibration
+            // mode (toggled in `update`).
+            if let calibrationHud = attachments.entity(for: "calibrationHud") {
+                calibrationHud.position = SIMD3<Float>(0, 0.05, -0.7)
+                headAnchor.addChild(calibrationHud)
             }
 
             // Pause/exit overlay — hidden unless game.isPaused.
@@ -137,35 +167,69 @@ struct TrapRangeImmersiveView: View {
                 }
             }
 
-            game.fallbackAimProvider = { [weak headAnchor] in
-                guard let headAnchor, headAnchor.isAnchored else {
+            // Origin comes from the GUN's own position (the muzzle), not
+            // the head/eye — previously this used headAnchor directly,
+            // which meant the visual gun was pure decoration: no matter
+            // how you lined up the bead, it had zero effect on where the
+            // shot actually went, since the shot always just fired from
+            // your head's center. That's exactly what made it feel
+            // "impossible" — looking down the sight was meaningless.
+            // Direction still comes from where you're looking (head
+            // orientation), matching a real shouldered gun: the barrel
+            // points wherever your eye-rib-bead sightline points, which is
+            // parallel to your head's forward direction once actually
+            // shouldered. gunGroup has no rotation relative to headAnchor,
+            // so its own -Z is identical to head-forward anyway.
+            game.fallbackAimProvider = { [weak gunGroup, weak headAnchor] in
+                guard let gunGroup, let headAnchor, headAnchor.isAnchored else {
                     return (SIMD3<Float>(0, 1.6, 0), SIMD3<Float>(0, 0, -1))
                 }
-                let transform = headAnchor.transformMatrix(relativeTo: nil)
+                let transform = gunGroup.transformMatrix(relativeTo: nil)
                 let origin = SIMD3<Float>(transform.columns.3.x, transform.columns.3.y, transform.columns.3.z)
                 let forward = -SIMD3<Float>(transform.columns.2.x, transform.columns.2.y, transform.columns.2.z)
                 return (origin, forward)
             }
         } update: { content, attachments in
-            // Fallback stays on unconditionally for now — real Muse-tilt
-            // tracking's authorization check was just fixed but isn't yet
-            // confirmed working on-device, so don't hide the only gun
-            // visual that's guaranteed to render. The rod (museGunOverlay)
-            // also shows whenever a Muse is connected + Full immersion is
-            // picked, so if real tracking IS working now, you'll see it —
-            // as a thin rod with a red tip, distinct from the flat photo —
-            // moving independently of the photo behind it.
-            fallbackGunAnchor?.isEnabled = true
-            museGunOverlay?.isEnabled = game.museConnected && game.isFullImmersion
+            // Item 3 of the premium-sim brief: once real Muse aim tracking
+            // is actually live, the head-locked fallback is pure guesswork
+            // compared to it, so hide it and show the real tracked gun
+            // instead. Falls back to the head-locked gun the instant
+            // tracking drops (disconnect, mid-session reset, or a Muse
+            // that was never authorized in the first place) so there's
+            // always exactly one gun visible, never zero.
+            let trackingLive = game.museConnected && game.museIsTrackingLive
+            fallbackGunAnchor?.isEnabled = !trackingLive
+            museGunOverlay?.isEnabled = trackingLive
             practiceHudAnchor?.isEnabled = (game.mode == .practice)
             pauseMenuAnchor?.isEnabled = game.isPaused
+
+            let isCalibrating = (game.mode == .calibration)
+            calibrationGroup?.isEnabled = isCalibrating
+            if isCalibrating {
+                for (index, entity) in calibrationTargetEntities.enumerated() {
+                    entity.isEnabled = !game.calibrationComplete && index == game.calibrationTargetIndex
+                }
+                if game.calibrationTargetJustHit {
+                    let hitIndex = min(lastRenderedCalibrationIndex, calibrationTargetEntities.count - 1)
+                    if hitIndex >= 0 {
+                        performCalibrationBurst(on: calibrationTargetEntities[hitIndex])
+                    }
+                    game.calibrationTargetJustHit = false
+                }
+                lastRenderedCalibrationIndex = game.calibrationTargetIndex
+            } else {
+                lastRenderedCalibrationIndex = 0
+            }
+            if let calibrationHud = attachments.entity(for: "calibrationHud") {
+                calibrationHud.isEnabled = isCalibrating
+            }
 
             let isPatterning = (game.mode == .patterning)
             trapModeGroup?.isEnabled = !isPatterning
             patterningBoard?.isEnabled = isPatterning
             if isPatterning {
                 if lastRenderedPatterningDistance != game.patterningDistance {
-                    patterningBoard?.position = SIMD3<Float>(0, 1.4, -game.patterningDistance.meters)
+                    patterningBoard?.position = SIMD3<Float>(0, PatterningDistance.boardHeight, -game.patterningDistance.meters)
                     lastRenderedPatterningDistance = game.patterningDistance
                 }
                 refreshPatterningImpacts()
@@ -176,6 +240,9 @@ struct TrapRangeImmersiveView: View {
             }
             Attachment(id: "practiceHud") {
                 PracticeHUDView(game: game)
+            }
+            Attachment(id: "calibrationHud") {
+                CalibrationHUDView(game: game)
             }
             Attachment(id: "pauseMenu") {
                 PauseMenuView(game: game)
@@ -206,6 +273,12 @@ struct TrapRangeImmersiveView: View {
                     game.toggleMenu()
                 }
         )
+        // Without this, visionOS can convert a spatial-controller button
+        // press into a system gaze-and-pinch gesture instead of delivering
+        // it to the GameController handlers MuseAccessoryManager installs
+        // — worth having regardless of whether it's the whole story, since
+        // it's a real, documented visionOS behavior and costs nothing.
+        .handlesGameControllerEvents(matching: .gamepad)
         .task {
             while !Task.isCancelled {
                 game.tick(dt: 1.0 / 60.0)
@@ -286,6 +359,113 @@ struct TrapRangeImmersiveView: View {
         }
     }
 
+    // MARK: Calibration targets — apple / pumpkin / watermelon
+    //
+    // Per the user's own request ("maybe for the calibration screen you can
+    // put an apple or pumpkin and watermelon and we can blast away") —
+    // fun, game-like targets rather than a dry settings screen. Simple
+    // colored primitives, not an art pass; the point is a clear, distinct
+    // shape to aim at from each of the three calibration positions (see
+    // CalibrationTarget.localPosition), not photorealism.
+
+    private func buildCalibrationTargets() -> Entity {
+        let group = Entity()
+        var entities: [Entity] = []
+
+        for target in CalibrationTarget.allCases {
+            let fruit = buildFruit(for: target)
+            fruit.position = target.localPosition
+            fruit.isEnabled = false
+            group.addChild(fruit)
+            entities.append(fruit)
+        }
+
+        calibrationTargetEntities = entities
+        return group
+    }
+
+    private func buildFruit(for target: CalibrationTarget) -> Entity {
+        switch target {
+        case .apple:
+            let apple = Entity()
+            let body = ModelEntity(mesh: .generateSphere(radius: 0.09),
+                                    materials: [SimpleMaterial(color: .systemRed, roughness: 0.35, isMetallic: false)])
+            apple.addChild(body)
+            let stem = ModelEntity(mesh: .generateCylinder(height: 0.03, radius: 0.006),
+                                    materials: [SimpleMaterial(color: .init(red: 0.30, green: 0.20, blue: 0.10, alpha: 1.0), isMetallic: false)])
+            stem.position = SIMD3<Float>(0, 0.1, 0)
+            apple.addChild(stem)
+            return apple
+
+        case .pumpkin:
+            let pumpkin = Entity()
+            let body = ModelEntity(mesh: .generateSphere(radius: 0.13),
+                                    materials: [SimpleMaterial(color: .init(red: 0.90, green: 0.45, blue: 0.05, alpha: 1.0), roughness: 0.6, isMetallic: false)])
+            body.scale = SIMD3<Float>(1.0, 0.82, 1.0)
+            pumpkin.addChild(body)
+            let stem = ModelEntity(mesh: .generateCylinder(height: 0.04, radius: 0.012),
+                                    materials: [SimpleMaterial(color: .init(red: 0.30, green: 0.42, blue: 0.15, alpha: 1.0), isMetallic: false)])
+            stem.position = SIMD3<Float>(0, 0.11, 0)
+            pumpkin.addChild(stem)
+            return pumpkin
+
+        case .watermelon:
+            let melon = Entity()
+            let body = ModelEntity(mesh: .generateSphere(radius: 0.16),
+                                    materials: [SimpleMaterial(color: .init(red: 0.15, green: 0.45, blue: 0.20, alpha: 1.0), roughness: 0.4, isMetallic: false)])
+            body.scale = SIMD3<Float>(0.85, 1.0, 0.85)
+            melon.addChild(body)
+            return melon
+        }
+    }
+
+    /// A colorful pop-and-fade burst — reuses the muzzle flash's scale-based
+    /// animation shape but bigger and brighter, standing in for "blasting"
+    /// the fruit apart. The fruit itself just disappears at the same moment
+    /// (via the `update` closure's isEnabled toggle) rather than actually
+    /// fragmenting — a real fracture effect needs modeled debris pieces,
+    /// which is real art/geometry work, not something to fake with a
+    /// single primitive.
+    private func performCalibrationBurst(on target: Entity) {
+        let burst = Entity()
+        burst.position = target.position
+        target.parent?.addChild(burst)
+
+        let core = ModelEntity(mesh: .generateSphere(radius: 0.05), materials: [UnlitMaterial(color: .white)])
+        burst.addChild(core)
+        let chunkMaterial = UnlitMaterial(color: .init(white: 0.9, alpha: 1.0))
+        for i in 0..<10 {
+            let angle = (Float(i) / 10) * 2 * .pi
+            let chunk = ModelEntity(mesh: .generateSphere(radius: 0.02), materials: [chunkMaterial])
+            let direction = SIMD3<Float>(cos(angle), sin(angle) * 0.6, sin(angle * 0.5))
+            chunk.position = direction * 0.02
+            burst.addChild(chunk)
+
+            Task { @MainActor in
+                let steps = 10
+                for step in 0...steps {
+                    if Task.isCancelled { return }
+                    let t = Float(step) / Float(steps)
+                    chunk.position = direction * (0.02 + t * 0.22)
+                    chunk.scale = SIMD3<Float>(repeating: max(0, 1 - t))
+                    try? await Task.sleep(nanoseconds: 16_000_000)
+                }
+            }
+        }
+
+        Task { @MainActor in
+            let steps = 8
+            for step in 0...steps {
+                if Task.isCancelled { return }
+                let t = Float(step) / Float(steps)
+                let scale = t < 0.3 ? (t / 0.3) : max(0, 1 - (t - 0.3) / 0.7)
+                core.scale = SIMD3<Float>(repeating: scale)
+                try? await Task.sleep(nanoseconds: 16_000_000)
+            }
+            burst.removeFromParent()
+        }
+    }
+
     // MARK: Scenery — procedural, no image asset required
     //
     // The old version of this loaded a "trap_house_backdrop.jpg" from the
@@ -358,7 +538,7 @@ struct TrapRangeImmersiveView: View {
     // MARK: Field geometry — stupid simple grey boxes, real-world positions
 
     private func buildFieldGeometry(into root: Entity) {
-        let houseMesh = MeshResource.generateBox(width: 1.2, height: 1.0, depth: 1.2)
+        let houseMesh = MeshResource.generateBox(width: 0.6, height: 0.5, depth: 0.6)
         var houseMaterial = SimpleMaterial()
         houseMaterial.color = .init(tint: .init(white: 0.35, alpha: 1.0))
         let house = ModelEntity(mesh: houseMesh, materials: [houseMaterial])
@@ -511,10 +691,16 @@ struct TrapRangeImmersiveView: View {
     /// real shouldered gun's barrel points exactly where your eye is
     /// looking, just offset from it) — not angled in from the side, which
     /// would point the barrel somewhere other than your actual sightline.
-    private func buildFallbackGunOverlay() -> Entity {
-        let gun = buildMuseTrackedGunOverlay()
-        gun.position = SIMD3<Float>(0.10, -0.16, -0.85)
-        return gun
+    /// Offset reduced from an earlier, more aggressive guess — that one
+    /// read as too skewed to comfortably look straight down the sight.
+    /// Now that `fallbackAimProvider` fires from the gun's own position
+    /// (see that closure's comment) rather than head-center, a smaller
+    /// offset also means a smaller — though still real — parallax gap
+    /// between "looks aligned" and "is aligned."
+    private func buildFallbackGunOverlay() -> (root: Entity, proceduralPart: Entity, realPart: Entity) {
+        let (gun, procedural, real) = buildMuseTrackedGunOverlay()
+        gun.position = SIMD3<Float>(0.06, -0.10, -0.85)
+        return (gun, procedural, real)
     }
 
     /// Anchored under the Muse's aim point. Local -Z is the aim/fire
@@ -528,7 +714,22 @@ struct TrapRangeImmersiveView: View {
     /// the physical Muse (however it ends up mounted, e.g. inside a real
     /// Nerf-style housing) reads correctly from any angle you view it from,
     /// which a flat photo plane can't do.
-    private func buildMuseTrackedGunOverlay() -> Entity {
+    private func buildMuseTrackedGunOverlay() -> (root: Entity, proceduralPart: Entity, realPart: Entity) {
+        let root = Entity()
+        let procedural = buildProceduralShotgun()
+        root.addChild(procedural)
+
+        // Empty until loadRealShotgunEntity finishes — see that function's
+        // doc comment. Starts disabled so it can't ever show as a stray
+        // empty entity before the real model is actually parented into it.
+        let real = Entity()
+        real.isEnabled = false
+        root.addChild(real)
+
+        return (root, procedural, real)
+    }
+
+    private func buildProceduralShotgun() -> Entity {
         let group = Entity()
 
         // Blued-steel look: dark, low roughness, metallic — catches light
@@ -602,6 +803,55 @@ struct TrapRangeImmersiveView: View {
 
         return group
     }
+
+    // MARK: Real 3D shotgun model
+    //
+    // "Mossberg 940 Pro Tactical Shotgun" by Sayooj Sasikumar (Sketchfab:
+    // sketchfab.com/3d-models/mossberg-940-pro-tactical-shotgun-by-sayooj-s-c6ae3798d60d4c379015a9cb97e4f9f2),
+    // licensed CC Attribution 4.0 (creativecommons.org/licenses/by/4.0).
+    // This is a real, licensed, downloadable asset — used here to prove out
+    // the "look down the barrel at the Muse's aim" experience end to end
+    // before investing in an original or purpose-licensed unbranded
+    // engraved over-under for the final look. Credited on the Home screen
+    // per the license's requirement — see HomeView's footer text.
+    //
+    // Ungated for now: no LOD, no mesh reduction, no baked normal maps —
+    // it's the artist's full-resolution export straight out of Sketchfab's
+    // USDZ converter. That's fine for a close-up demo build; it's the
+    // known next step before this ships as anything more than a proof of
+    // concept (reduce to a lower triangle budget for close viewing, bake
+    // the difference into a normal map, add a lower-poly LOD for distance)
+    // — none of that is something to fake here, it needs real mesh-editing
+    // tooling (Blender / Reality Composer Pro), not code.
+    //
+    // Placement below is derived from the model's own raw geometry (via
+    // `usdcat` on its `scene.usdc`), not from ever having looked at it:
+    // its 4 meshes all share close to the same MAXIMUM local-Y extent
+    // (~+20 to +25.5cm) while their MINIMUM extents vary a lot (-14 to
+    // -55cm) — consistent with a shared frontmost reference point (the
+    // muzzle) and a butt/stock end that different parts reach different
+    // distances toward. That reasoning, not a visual check, is what picks
+    // local +Y as "muzzle" here. This app's convention is muzzle-at-origin,
+    // barrel along local -Z (see buildProceduralShotgun's doc comment), so
+    // the correction rotates local +Y onto world -Z, then shifts the model
+    // so that shared ~+25.5cm point lands at the wrapper's own origin.
+    // Expect this to need an on-device correction pass — if the model
+    // looks backwards, flip the rotation's sign; if the muzzle floats away
+    // from the aim point, adjust the 0.255 offset below.
+    private func loadRealShotgunEntity() async -> Entity? {
+        guard let url = Bundle.main.url(forResource: "ShotgunModel", withExtension: "usdz") else {
+            return nil
+        }
+        guard let model = try? await Entity(contentsOf: url) else {
+            return nil
+        }
+        model.orientation = simd_quatf(angle: -.pi / 2, axis: SIMD3<Float>(1, 0, 0))
+        model.position = SIMD3<Float>(0, 0, 0.255)
+
+        let wrapper = Entity()
+        wrapper.addChild(model)
+        return wrapper
+    }
 }
 
 /// World-anchored scoreboard standing next to the trap house — used in
@@ -659,6 +909,38 @@ private struct PracticeHUDView: View {
     }
 }
 
+/// Head-locked HUD shown only in Calibration mode — walks through aiming
+/// at each fruit target in turn (see CalibrationTarget), then confirms
+/// once the correction is saved. Exit is the same always-visible bottom-bar
+/// button every mode has, so there's nothing calibration-specific needed
+/// here for getting out.
+private struct CalibrationHUDView: View {
+    @ObservedObject var game: GameState
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if game.calibrationComplete {
+                Text("Calibration complete!")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.green)
+                Text("Aim correction saved.")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+            } else {
+                let target = CalibrationTarget.allCases[min(game.calibrationTargetIndex, CalibrationTarget.allCases.count - 1)]
+                Text("Aim at the \(target.displayName) and pull the trigger")
+                    .font(.system(size: 20, weight: .bold))
+                Text("Target \(game.calibrationTargetIndex + 1) of \(CalibrationTarget.allCases.count)")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(20)
+        .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
 /// Minimal pause/exit overlay, opened by a long-press look+pinch fallback,
 /// so leaving Round mode never requires a menu flashing into view
 /// unprompted.
@@ -712,6 +994,25 @@ private struct RecenterBarView: View {
                         Image(systemName: "plus.circle")
                     }
                 }
+            }
+
+            // The Muse can (and does) disconnect/reconnect during the
+            // Home-to-range transition, and a disconnect explicitly tears
+            // down the aim anchor (see MuseAccessoryManager
+            // .handleStylusDisconnected) — so a "tracking live" moment on
+            // the Home screen can be wiped out before you ever get here,
+            // with no way back in without this. Only shown once connected;
+            // no point offering it for a Muse that isn't even present.
+            if game.museConnected {
+                Button {
+                    Task {
+                        await game.museManager.retryAccessoryTracking()
+                    }
+                } label: {
+                    Label("Retry Tracking", systemImage: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .medium))
+                }
+                .buttonStyle(.bordered)
             }
 
             Button {

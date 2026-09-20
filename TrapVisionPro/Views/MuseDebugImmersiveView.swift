@@ -16,6 +16,7 @@
 
 import SwiftUI
 import RealityKit
+import GameController
 
 struct MuseDebugImmersiveView: View {
     @ObservedObject var game: GameState
@@ -30,5 +31,10 @@ struct MuseDebugImmersiveView: View {
             )
             game.museManager.attachAimVisual(sphere)
         }
+        // Same reasoning as TrapRangeImmersiveView — without this, a
+        // physical button press can get converted to a system gaze-and-
+        // pinch gesture instead of reaching the GameController callbacks
+        // this scene exists to validate.
+        .handlesGameControllerEvents(matching: .gamepad)
     }
 }

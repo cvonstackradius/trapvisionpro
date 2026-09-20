@@ -51,6 +51,7 @@ struct HomeView: View {
                         Text(String(format: "Tip %.2f · Secondary %.2f · Primary %@ · Pulls %d",
                                     game.museTipPressure, game.museSecondaryPressure,
                                     game.musePrimaryPressed ? "YES" : "no", game.museTriggerPullCount))
+                        Text("Last input: \(game.museLastInputEvent)")
                     }
                     .font(.system(.title3, design: .monospaced))
                     .foregroundStyle(.secondary)
@@ -71,6 +72,28 @@ struct HomeView: View {
                             .font(.body)
                     }
                     .buttonStyle(.bordered)
+
+                    // Item 2 of the premium-sim brief: watch "Last input"
+                    // above to see which physical control actually reaches
+                    // the app, then pick that one here so brushing the
+                    // other controls (e.g. gripping the housing) doesn't
+                    // also fire a shot during normal play.
+                    VStack(spacing: 6) {
+                        Picker("Trigger", selection: Binding(
+                            get: { game.museManager.triggerSource },
+                            set: { game.museManager.triggerSource = $0 }
+                        )) {
+                            ForEach(MuseTriggerSource.allCases) { source in
+                                Text(source.displayName).tag(source)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 360)
+                        Text("Fires from any control by default — once you know which one is real from \"Last input\" above, pick it here.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
                 }
 
                 VStack(spacing: 8) {
@@ -172,6 +195,31 @@ struct HomeView: View {
                     }
                     .buttonStyle(.bordered)
 
+                    // Item 1 of the premium-sim brief: aim the mounted Muse
+                    // at a few real targets and save the offset so the
+                    // virtual barrel/scoring ray actually lines up with
+                    // wherever the physical housing points. Needs live Muse
+                    // tracking to record a sample — if tracking isn't live,
+                    // firing here just shows a message saying so instead of
+                    // silently doing nothing.
+                    Button {
+                        Task {
+                            game.startCalibration()
+                            _ = await openImmersiveSpace(id: "TrapRange")
+                            dismissWindow()
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Calibrate Muse Aim").font(.title2.bold())
+                            Text("Aim at an apple, pumpkin, and watermelon to align the virtual barrel with your real one.")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                    }
+                    .buttonStyle(.bordered)
+
                     // A much simpler scene than the full trap range, just to
                     // prove the Muse itself works — connection, any-button
                     // trigger, and tilt-tracking — before trusting it inside
@@ -191,6 +239,14 @@ struct HomeView: View {
 
                 Text("Exit anytime with the Exit button on the bottom bar, or long-press look+pinch. In Practice, aim at the trap house and fire to cycle warm-up angle (Straight → Slight Curve → Full).")
                     .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+
+                // CC-BY 4.0 requires attribution wherever the work is used
+                // — this is a demo placeholder gun, not the final art, so
+                // credit stays visible until it's replaced.
+                Text("Shotgun model: \"Mossberg 940 Pro Tactical Shotgun\" by Sayooj Sasikumar, licensed CC-BY 4.0.")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
