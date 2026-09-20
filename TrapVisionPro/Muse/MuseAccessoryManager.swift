@@ -87,12 +87,17 @@ final class MuseAccessoryManager: ObservableObject {
     /// Local-space translation from the Muse's reported aim origin to the
     /// real muzzle. Rotation-only calibration still leaves a close-range
     /// parallax error whenever the Muse sits behind or below the muzzle.
-    /// Starts at a small backward guess (not zero) — on-device testing
-    /// found the uncalibrated gun rendering with its whole body sitting
-    /// right at the tracked tip, poking out further than it should.
-    /// Overwritten the moment real calibration runs (`updateMuzzleOffset`)
-    /// or a previously-saved value loads, so this only matters before that.
-    @Published private(set) var muzzleOffset: SIMD3<Float> = SIMD3<Float>(0, 0, 0.12) {
+    /// Starts at a backward guess, not zero — on-device testing found the
+    /// uncalibrated gun rendering with its whole body sitting right at the
+    /// tracked point, and a first small correction (0.12m) still wasn't
+    /// enough: the tracked "aim" point apparently corresponds to somewhere
+    /// out near where a real barrel's muzzle would be, well ahead of the
+    /// housing, not the housing itself — the reported feel was "needs to be
+    /// like in the chamber, move it back a couple feet minimum." 0.7m
+    /// (~2.3 ft) reflects that explicitly, not a small nudge. Overwritten
+    /// the moment real calibration runs (`updateMuzzleOffset`) or a
+    /// previously-saved value loads, so this only matters before that.
+    @Published private(set) var muzzleOffset: SIMD3<Float> = SIMD3<Float>(0, 0, 0.7) {
         didSet { applyAimVisualCorrection() }
     }
 
@@ -244,7 +249,7 @@ final class MuseAccessoryManager: ObservableObject {
 
     func resetCalibration() {
         aimCorrection = simd_quatf(real: 1, imag: .zero)
-        muzzleOffset = SIMD3<Float>(0, 0, 0.12)
+        muzzleOffset = SIMD3<Float>(0, 0, 0.7)
         calibrationSampleCount = 0
         calibrationSamples.removeAll()
         let defaults = UserDefaults.standard
