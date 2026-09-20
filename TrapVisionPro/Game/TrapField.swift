@@ -91,7 +91,7 @@ final class ClayTarget {
     private(set) var isFlying = true
     private(set) var timeAloft: Float = 0
 
-    init(startPosition: SIMD3<Float>, launchSpeed: Float, headingDegrees: Float, elevationDegrees: Float) {
+    init(startPosition: SIMD3<Float>, launchSpeed: Float, headingDegrees: Float, elevationDegrees: Float, visualRadius: Float = 0.055) {
         let heading = headingDegrees * .pi / 180
         let elevation = elevationDegrees * .pi / 180
         let direction = SIMD3<Float>(
@@ -103,8 +103,12 @@ final class ClayTarget {
         self.position = startPosition
 
         // Simple flat disc mesh standing in for a clay pigeon until a real
-        // clay-target USDZ asset is dropped into Resources/.
-        let mesh = MeshResource.generateCylinder(height: 0.025, radius: 0.055)
+        // clay-target USDZ asset is dropped into Resources/. `visualRadius`
+        // only changes how big it LOOKS — actual hit-testing always uses
+        // PelletPattern.clayRadius (see simulatePelletShot), scaled by
+        // whichever hitRadiusMultiplier the caller passes in, independent
+        // of this mesh's size.
+        let mesh = MeshResource.generateCylinder(height: 0.025, radius: visualRadius)
         var material = SimpleMaterial()
         material.color = .init(tint: .orange.withAlphaComponent(0.95))
         self.entity = ModelEntity(mesh: mesh, materials: [material])

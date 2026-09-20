@@ -211,7 +211,7 @@ struct TrapRangeImmersiveView: View {
             let trackingLive = game.museConnected && game.museIsTrackingLive
             fallbackGunAnchor?.isEnabled = !trackingLive
             museGunOverlay?.isEnabled = trackingLive
-            practiceHudAnchor?.isEnabled = (game.mode == .practice)
+            practiceHudAnchor?.isEnabled = (game.mode == .practice || game.mode == .crazyEasy)
             pauseMenuAnchor?.isEnabled = game.isPaused
 
             let isCalibrating = (game.mode == .calibration)
@@ -236,7 +236,12 @@ struct TrapRangeImmersiveView: View {
             }
 
             let isPatterning = (game.mode == .patterning)
-            trapModeGroup?.isEnabled = !isPatterning
+            // Crazy Easy's own targets are plain ClayTarget entities GameState
+            // adds directly to fieldRoot (same as real clays), so they need
+            // no dedicated group here — just keep the trap house/station
+            // markers out of the way so they don't visually compete with the
+            // 5 stationary discs sitting much closer in.
+            trapModeGroup?.isEnabled = !isPatterning && game.mode != .crazyEasy
             patterningBoard?.isEnabled = isPatterning
             if isPatterning {
                 if lastRenderedPatterningDistance != game.patterningDistance {
@@ -965,12 +970,18 @@ private struct PracticeHUDView: View {
                     .font(.system(size: 26, weight: .heavy))
                     .foregroundStyle(.red)
             }
-            Text("\(game.hits)/\(game.attempts) · Station \(game.currentStationNumber)")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.white.opacity(0.8))
-            Text("Warm-up: \(game.warmupLevel.displayName)")
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(.white.opacity(0.6))
+            if game.mode == .crazyEasy {
+                Text("Crazy Easy · \(game.crazyEasyHitCount)/5 down")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+            } else {
+                Text("\(game.hits)/\(game.attempts) · Station \(game.currentStationNumber)")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                Text("Warm-up: \(game.warmupLevel.displayName)")
+                    .font(.system(size: 12, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.6))
+            }
             if !game.lastResultText.isEmpty {
                 Text(game.lastResultText)
                     .font(.system(size: 12, weight: .medium))

@@ -448,27 +448,24 @@ final class MuseAccessoryManager: ObservableObject {
 
     /// The whole reason a manual "Retry Tracking" button exists at all:
     /// accessory-tracking authorization frequently doesn't settle on the
-    /// very first connection attempt, but DOES succeed a few seconds later
-    /// with no user action other than pressing that button again. Requiring
-    /// someone to know that button exists, find it (previously only on the
-    /// Home screen, then also added in-range after Home's retry didn't
-    /// survive the Home→Range transition), and press it — possibly more
-    /// than once — is exactly the "how do I even get this working" dead end
-    /// reported this session. This automates the same retry the button
-    /// performs: every 1.5s for the first ~15s after connecting, unless/
-    /// until real tracking is confirmed live (`isAimTrackingLive`, which
-    /// only flips true from an actual per-frame anchor check — see
-    /// `pollOnce()` — not just from an anchor merely being created). The
-    /// manual button stays too, both as a way to force an immediate retry
-    /// without waiting, and as a safety net if this loop's window closes
-    /// before tracking happens to settle.
+    /// very first connection attempt, but DOES succeed later with no user
+    /// action other than pressing that button again. On-device testing
+    /// showed this can take longer than the ~15s this loop originally gave
+    /// up after — tracking only ever came alive from a manual press well
+    /// after that window closed, meaning the loop wasn't the reason it
+    /// eventually worked. Retries every 2s for as long as the device stays
+    /// connected and tracking isn't live yet — no attempt cap, since we
+    /// don't actually know how long authorization can take and stopping
+    /// early just reproduces the exact "only works if I press the button"
+    /// dead end this loop exists to remove. The manual button stays too, as
+    /// a way to force an immediate retry without waiting out the interval.
     private func startAutoRetryLoop() {
         autoRetryTask?.cancel()
         autoRetryTask = Task { @MainActor [weak self] in
-            for _ in 0..<10 {
+            while true {
                 guard let self, !Task.isCancelled else { return }
                 if self.isAimTrackingLive { return }
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
                 if Task.isCancelled { return }
                 await self.retryAccessoryTracking()
             }

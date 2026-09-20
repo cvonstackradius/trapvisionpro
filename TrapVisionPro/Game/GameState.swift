@@ -34,6 +34,13 @@ enum AppMode {
     case patterning
     /// Guided Muse calibration — see CalibrationTarget's doc comment.
     case calibration
+    /// Five big, fully stationary discs standing in a row close in front of
+    /// you — no trap timing, no flight, no lead. Requested directly as a
+    /// diagnostic-friendly "can I even hit anything" mode: if aim tracking
+    /// or calibration is off, a normal trap round makes that indistinguishable
+    /// from just being bad at leading a moving clay. This removes every
+    /// variable except aim itself.
+    case crazyEasy
 }
 
 /// One calibration step: aim the physical Muse (however it ends up
@@ -260,6 +267,25 @@ final class GameState: ObservableObject {
     /// further scoring happens to them, they're just cleaned up once they
     /// land.
     private var fallingClays: [ClayTarget] = []
+
+    /// Crazy Easy's 5 stationary discs, still standing. Entries are removed
+    /// (not flagged) as they're hit — simplest way to always know exactly
+    /// which ones are left without a separate hit-tracking array.
+    private var crazyEasyTargets: [ClayTarget] = []
+    @Published var crazyEasyHitCount: Int = 0
+    private static let crazyEasyTargetCount = 5
+    /// Close and stationary on purpose — see AppMode.crazyEasy's doc
+    /// comment. 7 yards is close enough that even a fairly rough aim
+    /// correction should land a hit, but still a real shotgun distance, not
+    /// point-blank.
+    private static let crazyEasyDistance: Float = 6.4
+    private static let crazyEasySpacing: Float = 1.1
+    private static let crazyEasyHeight: Float = 1.4
+    /// Deliberately huge — PelletPattern.clayRadius (0.055m) times this is
+    /// the effective hit radius, independent of the target's rendered
+    /// size. "Crazy easy" means crazy easy: if this doesn't land hits, the
+    /// problem is aim/tracking, not difficulty.
+    private static let crazyEasyHitRadiusMultiplier: Float = 8.0
     private var cancellables = Set<AnyCancellable>()
     private var sessionStarted = false
 
@@ -350,6 +376,79 @@ final class GameState: ObservableObject {
         calibrationTargetIndex = 0
         calibrationComplete = false
         museManager.resetCalibration()
+    }
+
+    /// Enter Crazy Easy — see AppMode.crazyEasy's doc comment.
+    func startCrazyEasy() {
+        mode = .crazyEasy
+        resetScoreState()
+        crazyEasyHitCount = 0
+        rackCrazyEasyTargets()
+    }
+
+    private func rackCrazyEasyTargets() {
+        crazyEasyTargets.forEach { $0.entity.removeFromParent() }
+        crazyEasyTargets = (0..<Self.crazyEasyTargetCount).map { index in
+            let centeredIndex = Float(index) - Float(Self.crazyEasyTargetCount - 1) / 2
+            let position = SIMD3<Float>(
+                centeredIndex * Self.crazyEasySpacing,
+                Self.crazyEasyHeight,
+                -Self.crazyEasyDistance
+            )
+            // heading 180°/elevation 0° makes the disc's flat face point
+            // back toward the shooter (+Z) instead of away — launchSpeed 0
+            // and never calling .step() on these keeps them perfectly
+            // stationary; ClayTarget doesn't need a separate "static"
+            // concept, just nobody advancing its physics.
+            let target = ClayTarget(startPosition: position, launchSpeed: 0,
+                                     headingDegrees: 180, elevationDegrees: 0,
+                                     visualRadius: 0.16)
+            fieldRoot.addChild(target.entity)
+            return target
+        }
+    }
+
+    /// Every trigger pull is an immediate shot at whichever standing target
+    /// your aim best lines up with — no pull step, no lead, no timing.
+    /// Firing once every target is down re-racks a fresh set of 5.
+    private func fireCrazyEasyShot() {
+        guard !isPaused else { return }
+        shotFired.send()
+
+        guard !crazyEasyTargets.isEmpty else {
+            rackCrazyEasyTargets()
+            crazyEasyHitCount = 0
+            lastResultText = "Fresh rack — 5 up."
+            return
+        }
+        guard let aim = museManager.aimOriginAndForward ?? fallbackAimProvider?() else {
+            lastResultText = "No aim source available"
+            return
+        }
+
+        var bestIndex: Int?
+        var bestResult: PelletShotResult?
+        for (index, target) in crazyEasyTargets.enumerated() {
+            let result = simulatePelletShot(aimOrigin: aim.origin, aimForward: aim.forward, clay: target,
+                                             hitRadiusMultiplier: Self.crazyEasyHitRadiusMultiplier)
+            if result.hit, bestResult == nil || result.centerMissDistance < bestResult!.centerMissDistance {
+                bestIndex = index
+                bestResult = result
+            }
+        }
+
+        guard let index = bestIndex, let result = bestResult else {
+            lastResultText = "Miss"
+            return
+        }
+        let target = crazyEasyTargets.remove(at: index)
+        let kind = ClayBreakKind.classify(pelletsConnected: result.pelletsConnected, totalPellets: result.totalPellets)
+        spawnClayBreak(kind: kind, at: target.currentPosition, incomingVelocity: .zero, into: fieldRoot)
+        target.entity.removeFromParent()
+        crazyEasyHitCount += 1
+        lastResultText = crazyEasyTargets.isEmpty
+            ? "All 5 down! Fire again for a fresh rack."
+            : "Hit! \(crazyEasyHitCount)/\(Self.crazyEasyTargetCount)"
     }
 
     private func resetScoreState() {
@@ -447,6 +546,10 @@ final class GameState: ObservableObject {
         }
         if mode == .patterning {
             firePatterningShot()
+            return
+        }
+        if mode == .crazyEasy {
+            fireCrazyEasyShot()
             return
         }
         if activeClay == nil {

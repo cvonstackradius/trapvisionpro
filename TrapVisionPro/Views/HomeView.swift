@@ -161,6 +161,29 @@ struct HomeView: View {
                     }
                     .buttonStyle(.borderedProminent)
 
+                    // Requested directly as a way to isolate whether aim
+                    // tracking itself works, separate from trap timing/lead
+                    // — 5 big, fully stationary discs close in, no flight,
+                    // no clock. If this can't be hit either, the problem is
+                    // aim/calibration, not difficulty.
+                    Button {
+                        Task {
+                            game.startCrazyEasy()
+                            _ = await openImmersiveSpace(id: "TrapRange")
+                            dismissWindow()
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Crazy Easy").font(.title2.bold())
+                            Text("5 big stationary targets, close range — no timing, no lead, just aim.")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                    }
+                    .buttonStyle(.bordered)
+
                     Button {
                         Task {
                             game.startRound()
