@@ -194,6 +194,9 @@ final class GameState: ObservableObject {
     @Published var musePrimaryPressed: Bool = false
     @Published var museLastInputEvent: String = "No input yet"
     @Published var museTriggerPullCount: Int = 0
+    /// Live raw (uncorrected) aim yaw/pitch/roll, straight from the SDK —
+    /// see MuseAccessoryManager.rawAimDebugText's doc comment.
+    @Published var museRawAimDebugText: String = "No aim data"
     /// True only while a real Muse aim anchor is live-tracking — the View
     /// uses this (not just `museConnected`) to decide whether to show the
     /// head-locked fallback gun or the Muse-tracked one, per
@@ -325,6 +328,7 @@ final class GameState: ObservableObject {
         museManager.$lastSecondaryPressure.sink { [weak self] in self?.museSecondaryPressure = $0 }.store(in: &cancellables)
         museManager.$isPrimaryButtonPressed.sink { [weak self] in self?.musePrimaryPressed = $0 }.store(in: &cancellables)
         museManager.$lastInputEvent.sink { [weak self] in self?.museLastInputEvent = $0 }.store(in: &cancellables)
+        museManager.$rawAimDebugText.sink { [weak self] in self?.museRawAimDebugText = $0 }.store(in: &cancellables)
         museManager.$isAimTrackingLive.sink { [weak self] in self?.museIsTrackingLive = $0 }.store(in: &cancellables)
         voiceListener.$authorizationDenied.sink { [weak self] in self?.voiceAuthorizationDenied = $0 }.store(in: &cancellables)
 

@@ -151,6 +151,16 @@ struct TrapRangeImmersiveView: View {
                 headAnchor.addChild(calibrationHud)
             }
 
+            // Always-visible raw-aim debug readout, in every mode — added
+            // specifically so numbers can be read live while physically
+            // holding the Muse different ways, instead of guessing at
+            // rotation math from indirect symptoms. Placed up and out of
+            // the way of the other HUDs and the gun itself.
+            if let debugHud = attachments.entity(for: "debugHud") {
+                debugHud.position = SIMD3<Float>(0, 0.35, -0.7)
+                headAnchor.addChild(debugHud)
+            }
+
             // Pause/exit overlay — hidden unless game.isPaused.
             if let pauseMenu = attachments.entity(for: "pauseMenu") {
                 pauseMenu.position = SIMD3<Float>(0, 0, -0.8)
@@ -256,6 +266,9 @@ struct TrapRangeImmersiveView: View {
             }
             Attachment(id: "practiceHud") {
                 PracticeHUDView(game: game)
+            }
+            Attachment(id: "debugHud") {
+                DebugAimHUDView(game: game)
             }
             Attachment(id: "calibrationHud") {
                 CalibrationHUDView(game: game)
@@ -956,6 +969,23 @@ private struct ScoreboardView: View {
         .padding(20)
         .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 16))
         .opacity(game.mode == .round ? 1 : 0)
+    }
+}
+
+/// Always-visible, mode-independent readout of the RAW (uncorrected) aim
+/// direction — see MuseAccessoryManager.rawAimDebugText's doc comment for
+/// why this exists: reading actual numbers while physically holding the
+/// Muse different ways, instead of inferring rotation fixes from symptoms
+/// like "the gun looks wrong."
+private struct DebugAimHUDView: View {
+    @ObservedObject var game: GameState
+
+    var body: some View {
+        Text(game.museRawAimDebugText)
+            .font(.system(size: 13, weight: .medium, design: .monospaced))
+            .foregroundStyle(.yellow)
+            .padding(10)
+            .background(.black.opacity(0.4), in: RoundedRectangle(cornerRadius: 10))
     }
 }
 

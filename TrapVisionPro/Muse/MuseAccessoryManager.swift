@@ -710,6 +710,51 @@ final class MuseAccessoryManager: ObservableObject {
                 aimStatus = "Aim anchor waiting for tracking"
             }
         }
+        updateRawAimDebugText()
+    }
+
+    /// Live numeric readout of the RAW (uncorrected, straight from the SDK)
+    /// aim direction — added specifically to stop guessing at rotation math
+    /// from indirect symptoms ("gun looks wrong", "had to hold it up in the
+    /// air") and instead read off actual numbers while holding the Muse
+    /// different ways. Yaw/pitch describe the "aim" location's own forward
+    /// direction (0/0 = dead ahead and level); roll describes its own "up"
+    /// relative to true up for that forward direction (0 = right-side up).
+    /// This is calibration-independent — it's what the hardware/OS reports
+    /// before any of our own correction is applied — so it's the right
+    /// thing to compare against "what I'm actually physically doing" to
+    /// tell whether a mismatch is a real device/tracking issue or a bug in
+    /// how this app then transforms that reading.
+    @Published var rawAimDebugText: String = "No aim data"
+
+    private func updateRawAimDebugText() {
+        guard let anchor = aimAnchor, anchor.isAnchored else {
+            rawAimDebugText = "No aim data"
+            return
+        }
+        let matrix = anchor.transformMatrix(relativeTo: nil)
+        let rotation = simd_float3x3(
+            SIMD3<Float>(matrix.columns.0.x, matrix.columns.0.y, matrix.columns.0.z),
+            SIMD3<Float>(matrix.columns.1.x, matrix.columns.1.y, matrix.columns.1.z),
+            SIMD3<Float>(matrix.columns.2.x, matrix.columns.2.y, matrix.columns.2.z)
+        )
+        let rawForward = normalize(-rotation.columns.2)
+        let rawUp = normalize(rotation.columns.1)
+
+        // 0° yaw/pitch = pointing straight down local -Z and level.
+        let yaw = atan2(rawForward.x, -rawForward.z) * 180 / .pi
+        let pitch = asin(max(-1, min(1, rawForward.y))) * 180 / .pi
+
+        // Roll: compare the raw "up" against what "level" up would be for
+        // this same forward direction. 0° = right-side up, ±180° = upside
+        // down, ±90° = rolled onto one side.
+        let right = length(cross(rawForward, SIMD3<Float>(0, 1, 0))) > 0.001
+            ? normalize(cross(rawForward, SIMD3<Float>(0, 1, 0)))
+            : SIMD3<Float>(1, 0, 0)
+        let levelUp = normalize(cross(right, rawForward))
+        let roll = atan2(dot(rawUp, right), dot(rawUp, levelUp)) * 180 / .pi
+
+        rawAimDebugText = String(format: "RAW yaw %.0f° pitch %.0f° roll %.0f°", yaw, pitch, roll)
     }
 
     // MARK: Haptics

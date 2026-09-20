@@ -52,6 +52,12 @@ struct HomeView: View {
                                     game.museTipPressure, game.museSecondaryPressure,
                                     game.musePrimaryPressed ? "YES" : "no", game.museTriggerPullCount))
                         Text("Last input: \(game.museLastInputEvent)")
+                        // Only refreshes once you've entered a range at
+                        // least once this session (it's updated from the
+                        // per-frame loop that only runs there) — the
+                        // in-range debug readout is the one to actually
+                        // watch live while testing different holds.
+                        Text(game.museRawAimDebugText)
                     }
                     .font(.system(.title3, design: .monospaced))
                     .foregroundStyle(.secondary)
